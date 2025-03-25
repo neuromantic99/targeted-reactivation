@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "run main",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "main.py",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {"PYDEVD_WARN_SLOW_RESOLVE_TIMEOUT": "10"},
+    }
+
+  ]
+}
