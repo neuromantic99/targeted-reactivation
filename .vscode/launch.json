@@ -9,6 +9,15 @@
       "console": "integratedTerminal",
       "justMyCode": true,
       "env": {"PYDEVD_WARN_SLOW_RESOLVE_TIMEOUT": "10"},
+    },
+    {
+      "name": "vdieo itme",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "video_timestamps.py",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {"PYDEVD_WARN_SLOW_RESOLVE_TIMEOUT": "10"},
     }
 
   ]
