@@ -1,7 +1,8 @@
+from datetime import datetime
 from pathlib import Path
 import subprocess
 import json
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
@@ -25,6 +26,8 @@ def get_frame_timestamps(video_path: Path) -> List | None:
     result = subprocess.run(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
+    with open("result.json", "w") as f:
+        f.write(result.stdout)
 
     if result.returncode != 0:
         print("Error running ffprobe:", result.stderr)
@@ -38,10 +41,38 @@ def get_frame_timestamps(video_path: Path) -> List | None:
         if "pts_time" in frame
     ]
 
+    print(len(timestamps))
     print(np.max(np.diff(timestamps)))
     return timestamps
 
 
-umbrella = Path("/Volumes/MarcBusche/Qichen/20250414/")
+def get_creation_time(video_path: Path) -> Optional[datetime]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "format_tags=creation_time",
+        "-of",
+        "json",
+        str(video_path),
+    ]
+    result = subprocess.run(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
 
-get_frame_timestamps(umbrella / "09266_2025-04-14-150325-0000.mp4")
+    if result.returncode != 0:
+        print("Error getting creation_time:", result.stderr)
+        return None
+
+    data = json.loads(result.stdout)
+    try:
+        creation_time_str = data["format"]["tags"]["creation_time"]
+        return datetime.fromisoformat(
+            creation_time_str.replace("Z", "+00:00")
+        )  # handle UTC 'Z'
+    except (KeyError, ValueError) as e:
+        print("Could not parse creation_time:", e)
+        return None

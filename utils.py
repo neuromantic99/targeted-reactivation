@@ -4,10 +4,15 @@ import numpy as np
 import cv2
 
 
+def get_number_of_frames(video_path: Path) -> int:
+    return int(cv2.VideoCapture(str(video_path)).get(cv2.CAP_PROP_FRAME_COUNT))
+
+
 def extract_frames_fast(video_path: Path, frame_indices: np.ndarray) -> np.ndarray:
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(str(video_path))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     frame_array = np.zeros((height, width, len(frame_indices), 3), dtype=np.uint8)
 
