@@ -8,6 +8,7 @@ import numpy as np
 
 
 def get_frame_timestamps(video_path: Path) -> List | None:
+
     # Command to extract frame info using ffprobe
     cmd = [
         "ffprobe",
@@ -35,6 +36,7 @@ def get_frame_timestamps(video_path: Path) -> List | None:
 
     # Parse JSON output
     data = json.loads(result.stdout)
+
     timestamps = [
         float(frame["pts_time"])
         for frame in data.get("frames", [])

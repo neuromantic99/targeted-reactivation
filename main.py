@@ -1,20 +1,26 @@
 from pathlib import Path
-import random
 from typing import List, Tuple
 
 import numpy as np
+import matplotlib.pyplot as plt
 
 from data_import import Session
 
 
+from lfp import plot_lfps, plot_spectrogram
 from models import LED, Sound
 
-import matplotlib.pyplot as plt
 
 from utils import extract_frames_fast, get_number_of_frames, save_video
-from video_timestamps import get_creation_time, get_frame_timestamps
-from ripples.utils_npyx import load_lfp_npyx, load_sync_npyx
+from ripples.utils_npyx import load_sync_npyx, load_lfp_reactivations
 from ripples.utils import threshold_detect
+
+
+from ripples.utils import (
+    bandpass_filter,
+    compute_power,
+    compute_envelope,
+)
 
 from rsync import Rsync_aligner
 
@@ -62,34 +68,44 @@ def process_session(session: Session) -> Tuple[List[Sound], List[LED] | None]:
     return sounds, leds
 
 
-def main(data_folder: Path, lfp_path: Path) -> None:
+def load_data(
+    data_folder: Path,
+) -> Tuple[List[Path], List[Path], List[Path]]:
+    return (
+        sorted(list(data_folder.glob("*.mp4"))),
+        sorted(list(data_folder.glob("*time.npy"))),
+        sorted(list(data_folder.glob("*.tsv"))),
+    )
 
-    video_files = sorted(list(data_folder.glob("*.mp4")))
-    trigger_files = sorted(list(data_folder.glob("*time.npy")))
-    pycontrol_files = sorted(list(data_folder.glob("*.tsv")))
-    assert (
-        len(video_files) == len(trigger_files) == len(pycontrol_files)
-    ), "Mismatch in number of files, Got {len(video_files)} videos, {len(trigger_files)} triggers and {len(pycontrol_files)} pycontrol files"
 
+def main_11153(data_folder: Path, lfp_paths: List[Path]) -> None:
+    mouse = data_folder.name
+
+    video_files, trigger_files, pycontrol_files = load_data(data_folder)
     n_video_frames = [get_number_of_frames(video_file) for video_file in video_files]
+    sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
+
     n_triggers = [
         np.load(trigger_file, allow_pickle=True).shape[0]
         for trigger_file in trigger_files
     ]
-    sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
 
-    assert np.all(
-        n_video_frames == n_triggers
-    ), f"Number of video frames and triggers do not match, this may happen, look for off-by-ones. Got {n_video_frames} video frames, and {n_triggers} triggers"
+    raw_sync = []
+    for idx, lfp_path in enumerate(lfp_paths):
 
-    print("Startng lfp load")
-    # raw_sync = load_sync_npyx(lfp_path)
-    # np.save("RAW_SYNC.npy", raw_sync)
+        raw_sync_path = Path(f"raw_sync_{idx}_{mouse}.npy")
+        if raw_sync_path.exists():
+            raw_sync.append(np.load(f"raw_sync_{idx}_{mouse}.npy"))
+        else:
+            raw_sync.append(load_sync_npyx(lfp_path))
+            np.save(raw_sync_path, raw_sync[idx])
 
-    raw_sync = np.load("RAW_SYNC.npy")
-    print("finished lfpd  load")
-    sync_npx = threshold_detect(raw_sync, 0.5)
+    # Ignore the second recording for now
+    n_video_frames = [n_video_frames[2], n_video_frames[3], n_video_frames[4]]
+    n_triggers = [n_triggers[3], n_triggers[4], n_triggers[5]]
+    sessions = [sessions[3], sessions[4], sessions[5]]
 
+    sync_npx = threshold_detect(raw_sync[0], 0.5)
     rsync_times = [session.times["rsync"] for session in sessions]
     assert sum(len(rs) for rs in rsync_times) == len(sync_npx)
 
@@ -103,14 +119,63 @@ def main(data_folder: Path, lfp_path: Path) -> None:
                 raise_exception=True,
             )
         )
+
+        chunk_start += len(rsync_time)
+
+    plot_lfps(lfp_paths, mouse, aligners)
+
+
+def main(data_folder: Path, lfp_path: Path) -> None:
+    mouse = data_folder.name
+    video_files, trigger_files, pycontrol_files = load_data(data_folder)
+
+    n_video_frames = [get_number_of_frames(video_file) for video_file in video_files]
+
+    n_triggers = [
+        np.load(trigger_file, allow_pickle=True).shape[0]
+        for trigger_file in trigger_files
+    ]
+
+    sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
+
+    assert (
+        len(n_video_frames) == len(n_triggers) == len(sessions)
+    ), f"Mismatch in number of files, Got {len(n_video_frames)} videos, {len(n_triggers)} triggers and {len(sessions)} pycontrol files"
+
+    if n_video_frames != n_triggers:
+        print(
+            f"Number of video frames and triggers do not match, this may happen. Got {n_video_frames} video frames, and {n_triggers} triggers"
+        )
+
+    print("Starting lfp load")
+    raw_sync_path = Path(f"raw_sync_{mouse}.npy")
+    if raw_sync_path.exists():
+        raw_sync = np.load(raw_sync_path)
+    else:
+        raw_sync = load_sync_npyx(lfp_path)
+        np.save(raw_sync_path, raw_sync)
+
+    sync_npx = threshold_detect(raw_sync, 0.5)
+    rsync_times = [session.times["rsync"] for session in sessions]
+    assert sum(len(rs) for rs in rsync_times) == len(sync_npx)
+
+    chunk_start = 0
+
+    chunk_start = np.sum([len(times) for times in rsync_times[:6]])
+    sync_npx = sync_npx[chunk_start:]
+    aligners = []
+    for rsync_time in rsync_times[6:]:
+        aligners.append(
+            Rsync_aligner(
+                sync_npx[chunk_start : chunk_start + len(rsync_time)],
+                rsync_time,
+                raise_exception=True,
+            )
+        )
+
         chunk_start += len(rsync_time)
 
     1 / 0
-
-    # rsync = Rsync_aligner(
-    #     sync_npx,
-    #     session.times["rsync"],
-    # )
 
     sounds, leds = process_session(session)
     n_frames = get_number_of_frames(video_path)
@@ -161,22 +226,55 @@ def get_light_videos(
         print(f"Done for trial {idx}")
 
 
+def test_suraya_data() -> None:
+    data_folder = Path(
+        "/Volumes/MarcBusche/Suraya/NPX/Sleep/Raw/01040_7M_S305N_EC_20241102/20241102_g1/20241102_g1_imec0"
+    )
+
+    lfp = np.load("lfp_suraya.npy")
+    # lfp = load_lfp_reactivations(
+    #     data_folder, chunk_start_seconds=0, chunk_end_seconds=5 * 60
+    # )
+
+    # np.save("lfp_suraya.npy", lfp)
+
+    RIPPLE_BAND = [120, 250]
+    # lfp = lfp[:300, :]
+    lfp = lfp - np.mean(lfp, axis=1, keepdims=True)
+    plot_spectrogram(lfp, 2500)
+
+    # Get the channels with the max SWR channel
+    # First 5 min of the recording
+    swr_power = compute_power(
+        bandpass_filter(
+            lfp[:, : 2500 * 5 * 60], RIPPLE_BAND[0], RIPPLE_BAND[1], 2500, order=4
+        )
+    )
+    plt.plot(compute_power(lfp[:, : 2500 * 5 * 60]))
+    1 / 0
+
+
 if __name__ == "__main__":
 
-    ########################################## Second Session ########################################################
-    # frame_trigger_time_path = Path(
-    #     "/Volumes/MarcBusche/Qichen/Neuropixels/mice/ELGH-09266/behavior/pycontrol data/20250424/09266-2025-04-24-230818_frame_trigger.time.npy"
-    # )
+    ################# 11153 ######################
+    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-05-18/11153")
+    # lfp_paths = [
+    #     data_folder / "20250518_g0" / "20250518_g0_imec0",
+    #     data_folder / "20250518_g1" / "20250518_g1_imec0",
+    # ]
+    # main_11153(data_folder, lfp_paths)
+    #############################################
 
-    # session_path = Path(
-    #     "/Volumes/MarcBusche/Qichen/Neuropixels/mice/ELGH-09266/behavior/pycontrol data/20250424/09266-2025-04-24-222710.tsv"
-    # )
-    # video_path = Path(
-    #     "/Volumes/MarcBusche/Qichen/Neuropixels/mice/ELGH-09266/behavior/video/09266_2025-04-24-230825-0000.mp4"
-    # )
-    # lfp_path = Path(
-    #     "/Volumes/MarcBusche/Qichen/Neuropixels/mice/ELGH-09266/2050424_g0/2050424_g0_imec0"
-    # )
-    data_folder = Path("/Volumes/MarcBusche/James/Alex/2025-05-16/11151")
-    lfp_path = data_folder / "20250516_g0" / "20250516_g0_imec0"
-    main(data_folder, lfp_path)
+    ################# 11151 ######################
+    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-05-19/11151")
+    # lfp_path = data_folder / "20250519_g0" / "20250519_g0_imec0"
+    # main(data_folder, lfp_path)
+    #############################################
+
+    ################# 11150 ######################
+
+    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-05-20/11150")
+    # lfp_path = data_folder / "20250520_g0" / "20250520_g0_imec0"
+    # main(data_folder, lfp_path)
+
+    test_suraya_data()
