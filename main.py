@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from data_import import Session
 
 
-from lfp import plot_lfps, plot_spectrogram
+from lfp import plot_ripple_power_by_channel, plot_spectrogram
 from models import LED, Sound
 
 
@@ -68,7 +68,7 @@ def process_session(session: Session) -> Tuple[List[Sound], List[LED] | None]:
     return sounds, leds
 
 
-def load_data(
+def get_data_paths(
     data_folder: Path,
 ) -> Tuple[List[Path], List[Path], List[Path]]:
     return (
@@ -81,7 +81,7 @@ def load_data(
 def main_11153(data_folder: Path, lfp_paths: List[Path]) -> None:
     mouse = data_folder.name
 
-    video_files, trigger_files, pycontrol_files = load_data(data_folder)
+    video_files, trigger_files, pycontrol_files = get_data_paths(data_folder)
     n_video_frames = [get_number_of_frames(video_file) for video_file in video_files]
     sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
 
@@ -122,12 +122,12 @@ def main_11153(data_folder: Path, lfp_paths: List[Path]) -> None:
 
         chunk_start += len(rsync_time)
 
-    plot_lfps(lfp_paths, mouse, aligners)
+    plot_ripple_power_by_channel(lfp_paths, mouse, aligners)
 
 
 def main(data_folder: Path, lfp_path: Path) -> None:
     mouse = data_folder.name
-    video_files, trigger_files, pycontrol_files = load_data(data_folder)
+    video_files, trigger_files, pycontrol_files = get_data_paths(data_folder)
 
     n_video_frames = [get_number_of_frames(video_file) for video_file in video_files]
 
@@ -155,16 +155,19 @@ def main(data_folder: Path, lfp_path: Path) -> None:
         raw_sync = load_sync_npyx(lfp_path)
         np.save(raw_sync_path, raw_sync)
 
+    # The times of the sync pulse recorded on the NPX
     sync_npx = threshold_detect(raw_sync, 0.5)
+
+    # The time of the sync pulse recorded on pycontrol
     rsync_times = [session.times["rsync"] for session in sessions]
+
     assert sum(len(rs) for rs in rsync_times) == len(sync_npx)
 
     chunk_start = 0
-
-    chunk_start = np.sum([len(times) for times in rsync_times[:6]])
-    sync_npx = sync_npx[chunk_start:]
+    # A list of Rsync_aligner objects, one for each session
+    # So in theory, aligner 0 is the conditioning aligner.
     aligners = []
-    for rsync_time in rsync_times[6:]:
+    for rsync_time in rsync_times:
         aligners.append(
             Rsync_aligner(
                 sync_npx[chunk_start : chunk_start + len(rsync_time)],
@@ -174,15 +177,14 @@ def main(data_folder: Path, lfp_path: Path) -> None:
         )
 
         chunk_start += len(rsync_time)
+    plot_ripple_power_by_channel(lfp_path=lfp_path, mouse=mouse, aligner=aligners[0])
 
-    1 / 0
+    # sounds, leds = process_session(session)
+    # n_frames = get_number_of_frames(video_path)
+    # camera_frame_times = np.load(frame_trigger_time_path, allow_pickle=True)
 
-    sounds, leds = process_session(session)
-    n_frames = get_number_of_frames(video_path)
-    camera_frame_times = np.load(frame_trigger_time_path, allow_pickle=True)
-
-    # get_sound_videos(sounds, camera_frame_times, video_path)
-    get_light_videos(leds, camera_frame_times, video_path)
+    # # get_sound_videos(sounds, camera_frame_times, video_path)
+    # get_light_videos(leds, camera_frame_times, video_path)
 
 
 def get_sound_videos(
@@ -266,9 +268,9 @@ if __name__ == "__main__":
     #############################################
 
     ################# 11151 ######################
-    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-05-19/11151")
-    # lfp_path = data_folder / "20250519_g0" / "20250519_g0_imec0"
-    # main(data_folder, lfp_path)
+    data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-05-19/11151")
+    lfp_path = data_folder / "20250519_g0" / "20250519_g0_imec0"
+    main(data_folder, lfp_path)
     #############################################
 
     ################# 11150 ######################
@@ -276,5 +278,3 @@ if __name__ == "__main__":
     # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-05-20/11150")
     # lfp_path = data_folder / "20250520_g0" / "20250520_g0_imec0"
     # main(data_folder, lfp_path)
-
-    test_suraya_data()
