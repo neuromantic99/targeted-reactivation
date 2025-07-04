@@ -28,7 +28,7 @@ def extract_frames_fast(video_path: Path, frame_indices: np.ndarray) -> np.ndarr
 
 def save_video(
     frames: np.ndarray, output_path: str = "output.mp4", fps: int = 30
-) -> None:
+) -> Hi:
     """
     Save a NumPy array of frames as an MP4 video using FFmpeg.
 
