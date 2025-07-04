@@ -1,4 +1,6 @@
 *.npy
+*.jpg
+*.png
 
 .DS_Store
 *.mp4

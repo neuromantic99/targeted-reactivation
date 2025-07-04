@@ -144,6 +144,49 @@ def plot_ripple_power_by_channel(
     # Common average referencing
     lfp = lfp - np.mean(lfp, axis=1, keepdims=True)
 
+    # Get the channels with the max SWR channel
+    # First 5 min of the recording
+    swr_power = compute_power(
+        bandpass_filter(
+            lfp[:, 0 : 2500 * 5 * 60], RIPPLE_BAND[0], RIPPLE_BAND[1], 2500, order=4
+        )
+    )
+    plt.plot(swr_power, color='black', linewidth=1)
+    if area_channel is None:
+        area_channel = map_channels_to_regions(-2200,-500,270,60,3200,384)
+    # Auto-color regions
+    unique_regions = sorted(set(area_channel), key=lambda x: area_channel.index(x))
+    cmap = plt.cm.get_cmap('tab20', len(unique_regions))  # Max 20 distinct colors
+    region_colors = {region: cmap(i) for i, region in enumerate(unique_regions)}
+
+    # Shade regions
+    current_region = area_channel[0]
+    start_channel = 0
+    legend_added = set()
+
+    for ch, region in enumerate(area_channel[1:], 1):
+        if region != current_region or ch == len(area_channel)-1:
+            end_channel = ch-1 if region != current_region else ch
+            color = region_colors[current_region]
+            plt.axvspan(start_channel, end_channel, color=color, alpha=0.3, 
+                    label=current_region if current_region not in legend_added else "")
+            legend_added.add(current_region)
+            start_channel = ch
+            current_region = region
+
+    plt.xlabel("Channel Number")
+    plt.ylabel("SWR Power")
+
+    # Add legend only for regions (no duplicate entries)
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))  # Remove duplicates
+    plt.legend(by_label.values(), by_label.keys(), 
+            bbox_to_anchor=(1.05, 1), 
+            loc='upper left')
+
+    plt.tight_layout()
+    plt.show()
+
     THETA_BAND = [5, 9]
     DELTA_BAND = [0.5, 4]
     RIPPLE_BAND = [120, 250]

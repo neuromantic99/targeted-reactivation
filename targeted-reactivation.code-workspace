@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "targeted-reactivation",
+			"path": "."
+		},
+		{
+			"name": "neuropixels_trajectory_explorer",
+			"path": "../neuropixels_trajectory_explorer"
+		}
+	],
+	"settings": {}
+}

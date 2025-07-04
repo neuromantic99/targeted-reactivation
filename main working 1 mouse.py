@@ -6,13 +6,12 @@ import matplotlib.pyplot as plt
 import matlab.engine
 
 from data_import import Session
-import pickle
+
 
 from lfp import plot_ripple_power_by_channel, plot_spectrogram, plot_swr_with_regions, plot_ripple_power_combined_processing
 from nte import map_channels_to_regions
 from models import LED, Sound
-from video_adjuster import adjust_video_duration, get_video_duration, adjust_video_to_lfp, adjust_and_split_video
-from swr_analysis import plot_swr_power_regions
+from video_adjuster import adjust_video_duration, get_video_duration, adjust_video_to_lfp
 
 
 from utils import extract_frames_fast, get_number_of_frames, save_video
@@ -328,14 +327,8 @@ def check_recording_durations(data_folder, lfp_path, video_frames, session, alig
     
     return plt.gcf(), durations
 
-def main(data_folder: Path, lfp_path: Path,
-         ap: float, ml: float, az: int,
-         elevation: int, depth: int, n_channels: int,
-         phase: int = 1) -> None:  # 1=SWR only, 2=Power plots only
-    
-    mouse_id = data_folder.name
-    
-
+def main(data_folder: Path, lfp_path: Path) -> None:
+    mouse = data_folder.name
     video_files, trigger_files, pycontrol_files = get_data_paths(data_folder)
 
     n_video_frames = [get_number_of_frames(video_file) for video_file in video_files]
@@ -471,57 +464,44 @@ def main(data_folder: Path, lfp_path: Path,
             print(f"  Error processing video: {str(e)}")
             print("  Using original video as fallback")
     
-    area_channel = map_channels_to_regions(ap, ml, az, elevation, depth, n_channels)
+    area_channel = map_channels_to_regions(-2500,-500,270,60,3200,384)
     total_sessions = len(sessions)
-
-    # PHASE 1: Only generate SWR plots
-    if phase == 1:
-        swr_output_dir = data_folder / "swr_plots"
-        swr_output_dir.mkdir(exist_ok=True)
+    sessions_list = []
+    for i, (aligner, session) in enumerate(zip(aligners, sessions)):
+        print(f"\nProcessing session {i+1}/{len(aligners)}")
+        aligner_id = f"{mouse}_{task_names[i]}_{i}"
+        sessions_list.append((lfp_path, session, (88, 133), (180, 320), aligner_id)) 
+        print(f"\nUnits A {aligner.units_A}, Units B {aligner.units_B}")
+        print(f"\nStart A {aligner.first_matched_time_A}, Start B {aligner.first_matched_time_B}")
+        print(f"\nEnd A {aligner.last_matched_time_A}, End B {aligner.last_matched_time_B}")
         
-                
-        sampling_rate = 2500  # Hz
-
-        for i, session in enumerate(sessions):
-            # Convert session times from seconds to samples
-            start_sample = int(session.run_start * sampling_rate)
-            end_sample = int(session.run_end * sampling_rate)
-            
-            print(f"Loading samples {start_sample}-{end_sample} "
-                f"({(end_sample-start_sample)/sampling_rate:.2f}s duration)")
-            
-            lfp = load_lfp_reactivations(lfp_path, start_sample, end_sample)
-            
-            # Verify loaded data structure
-            print(f"Loaded LFP shape: {lfp.shape if hasattr(lfp, 'shape') else 'invalid'}")
-            
-            if lfp.size == 0:
-                raise ValueError(f"No LFP data loaded for session {i}")
-            area_channel = map_channels_to_regions(ap, ml, az, elevation, depth, n_channels)
-            
-            output_path = swr_output_dir / f"{mouse_id}_session{i}_swr.png"
-            plot_swr_power_regions(lfp, area_channel, output_path)
         
-        return  # Stop after SWR plots
+        plot_ripple_power_by_channel(
+            lfp_path=lfp_path,
+            mouse=mouse,
+            aligner=aligner,
+            session=session,
+            ca1_range=(88, 133),
+            rsc_range=(180, 320),
+            aligner_id=aligner_id,
+            area_channel=area_channel  # Pass pre-computed mapping
+        )
 
-    # PHASE 2: Only generate power plots (requires manual ranges)
-    if phase == 2:
-        print(f"\nProcessing power plots for {mouse_id}")
-        ca1_range = (int(input("CA1 start: ")), int(input("CA1 end: ")))
-        rsc_range = (int(input("RSC start: ")), int(input("RSC end: ")))
         
-        # Your existing power plot generation code
-        for i, (session, aligner) in enumerate(zip(sessions, aligners)):
-            plot_ripple_power_by_channel(
-                lfp_path=lfp_path,
-                mouse=mouse_id,
-                aligner=aligner,
-                session=session,
-                ca1_range=ca1_range,
-                rsc_range=rsc_range,
-                aligner_id=f"{mouse_id}_{session.task_name}_{i}",
-                area_channel=map_channels_to_regions(ap, ml, az, elevation, depth, n_channels)
-            )
+        fig = plot_sync_alignment(
+        aligner, 
+        session, 
+        n_video_frames[i],
+        #chunk_start=aligner.first_matched_time_A / aligner.units_B,
+        #chunk_end=aligner.last_matched_time_A / aligner.units_B,
+        chunk_start=run_start,
+        chunk_end=run_end,
+        )
+        fig.savefig(f"sync_alignment_{mouse}_session{i}.png", dpi=300)
+        plt.close(fig)
+        last_pc = sessions[i].times['rsync'][-1]
+    last_match = aligner.last_matched_time_A / 2500
+    print(f"Session {i}: Last pyControl={last_pc:.3f}s, Last match={last_match:.3f}s, Offset={last_match-last_pc:.3f}s")
     
 
     print("finished channel mapping")
@@ -546,264 +526,16 @@ def main(data_folder: Path, lfp_path: Path,
     # Suraya's request to do the filters on the combined data for all 3 sessions
     plot_ripple_power_combined_processing(sessions_list)
   
-from typing import List, Tuple
-import pickle  # For saving session data between phases
 
-def process_mouse(
-    data_folder: Path,
-    lfp_path: Path,
-    ap: float, ml: float, az: int,
-    elevation: int, depth: int, n_channels: int,
-    phase: int = 1,  # 1=SWR only, 2=Power only
-    ca1_range: Tuple[int, int] = None,
-    rsc_range: Tuple[int, int] = None
-) -> List[Tuple]:  # Returns sessions_list for combined processing
-    mouse_id = data_folder.name
-    cache_file = data_folder / f"{mouse_id}_session_data.pkl"
+
     
-    # PHASE 1: Load data, align sessions, generate SWR plots
-    if phase == 1:
-        
-        video_files, trigger_files, pycontrol_files = get_data_paths(data_folder)
-        adjusted_dir = data_folder / "time_adjusted_videos"
-        adjusted_dir.mkdir(exist_ok=True, parents=True)
-        # Special handling for mouse 10679
-        if mouse_id == "10679" and len(video_files) == 1 and len(pycontrol_files) > 1:
-            sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
-            video_files = adjust_and_split_video(video_files[0], sessions, adjusted_dir)
-        
-        n_video_frames = [get_number_of_frames(video_file) for video_file in video_files]
-        
-        n_triggers = [
-            np.load(trigger_file, allow_pickle=True).shape[0]
-            for trigger_file in trigger_files
-        ]
+    # sounds, leds = process_session(session)
+    # n_frames = get_number_of_frames(video_path)
+    # camera_frame_times = np.load(frame_trigger_time_path, allow_pickle=True)
 
-        sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
-        
-        for i, session in enumerate(sessions):
-            print(f"Session {i}: run_start={session.run_start}, run_end={session.run_end}")
-            print(f"Session {i} times keys: {session.times.keys()}") 
+    # # get_sound_videos(sounds, camera_frame_times, video_path)
+    # get_light_videos(leds, camera_frame_times, video_path)
 
-        task_names = [session.task_name.replace(" ", "_").lower() for session in sessions]
-        extended_pc_times = []
-
-        for session in sessions:
-            run_start = session.times['run_start'][0]  # Access first element of array
-            rsync_pulses = session.times['rsync']
-            run_end = session.times['run_end'][0]
-            extended_pc_times.extend([run_start, *rsync_pulses, run_end])
-            print(f"Extended times for session: start={run_start}, end={run_end}, #rsync={len(rsync_pulses)}")
-
-        assert (
-            len(n_video_frames) == len(n_triggers) == len(sessions)
-        ), f"Mismatch in number of files, Got {len(n_video_frames)} videos, {len(n_triggers)} triggers and {len(sessions)} pycontrol files"
-
-        if n_video_frames != n_triggers:
-            print(
-                f"Number of video frames and triggers do not match, this may happen. Got {n_video_frames} video frames, and {n_triggers} triggers"
-            )
-
-        print("Starting lfp load")
-        raw_sync_path = Path(f"raw_sync_{mouse_id}.npy")
-        
-        if raw_sync_path.exists():
-            raw_sync = np.load(raw_sync_path)
-        else:
-            raw_sync = load_sync_npyx(lfp_path)
-            np.save(raw_sync_path, raw_sync)
-
-        # The times of the sync pulse recorded on the NPX
-        sync_npx = threshold_detect(raw_sync, 0.5)
-
-        # The time of the sync pulse recorded on pycontrol
-        rsync_times = [session.times["rsync"] for session in sessions]
-
-        chunk_start = 0
-        # A list of Rsync_aligner objects, one for each session
-        # So in theory, aligner 0 is the conditioning aligner.
-        aligners = []
-        for i, rsync_time in enumerate(rsync_times):
-            aligner = Rsync_aligner(
-                sync_npx[chunk_start : chunk_start + len(rsync_time)],
-                rsync_time,
-                raise_exception=True,
-            )
-            aligners.append(aligner)
-            chunk_start += len(rsync_time)
-        
-        
-        # Get the extended pyControl times (including run_start/end)
-        extended_pc_times = []
-        for session in sessions:
-            # Get all required times - not just those covered by sync pulses
-            run_start = session.times.get('run_start', np.array([0]))[0]
-            rsync_pulses = session.times.get('rsync', np.array([]))
-            run_end = session.times.get('run_end', np.array([0]))[0]
-            
-            extended_pc_times.extend([run_start, *rsync_pulses, run_end])
-
-        # Convert these extended pyControl times to neuropixel times
-        extended_npx_times = []
-        chunk_start = 0
-        for aligner, rsync_time in zip(aligners, rsync_times):
-            # Convert each session's extended times
-            session_pc_times = np.array(extended_pc_times[chunk_start : chunk_start + len(rsync_time) + 2])
-            print(f"Converting PC times to NPX: {session_pc_times}")
-            session_npx_times = aligner.B_to_A(session_pc_times, extrapolate=True)
-            print(f"Resulting NPX times: {session_npx_times}")
-            extended_npx_times.extend(session_npx_times)
-            chunk_start += len(rsync_time) + 2
-
-        # Replace sync_npx with the extended version
-        sync_npx = np.array(extended_npx_times)
-        print(f"Total rsync pulses from pycontrol: {sum(len(rs) for rs in rsync_times)}")
-        print(f"Number of sync_npx pulses after extension: {len(sync_npx)}")
-        print(f"Number of sessions: {len(rsync_times)}")
-        print(f"Expected extended length: {sum(len(rs) + 2 for rs in rsync_times)}")
-        expected_length = sum(len(rs) + 2 for rs in rsync_times)
-        assert expected_length == len(sync_npx), f"Expected {expected_length} sync pulses after extension, got {len(sync_npx)}"
-
-        ADJUSTMENT_THRESHOLD = 0.1  # Only adjust if difference >100ms
-        MIN_DURATION = 1.0          # Minimum valid video duration (seconds)
-        
-        for i, (video_file, session) in enumerate(zip(video_files, sessions)):
-            print(f"\nSession {i}: {video_file.name}")
-            
-            try:
-                # Get durations
-                video_duration = get_video_duration(video_file)
-                lfp_duration = session.run_end - session.run_start
-                duration_diff = lfp_duration - video_duration
-                abs_diff = abs(duration_diff)
-                
-                print(f"  Video: {video_duration:.3f}s | LFP: {lfp_duration:.3f}s")
-                print(f"  Difference: {duration_diff:+.3f}s ({duration_diff/video_duration*100:+.2f}%)")
-                
-                # Validate durations
-                if video_duration < MIN_DURATION:
-                    raise ValueError(f"Video too short ({video_duration:.1f}s)")
-                if lfp_duration < MIN_DURATION:
-                    raise ValueError(f"LFP duration too short ({lfp_duration:.1f}s)")
-                
-                # Only adjust if difference exceeds threshold
-                if abs_diff <= ADJUSTMENT_THRESHOLD:
-                    print("  Difference within tolerance, using original video")
-                    continue
-                    
-                output_path = adjusted_dir / f"adj_{duration_diff:+.1f}s_{video_file.name}"
-                
-                print(f"  Adjusting {'longer' if duration_diff > 0 else 'shorter'} by {abs_diff:.3f}s")
-                if adjust_video_to_lfp(video_file, lfp_duration, output_path):
-                    video_files[i] = output_path
-                    print("  Adjustment successful")
-                else:
-                    print("  Using original due to adjustment failure")
-                    
-            except Exception as e:
-                print(f"  Error processing video: {str(e)}")
-                print("  Using original video as fallback")
-        
-        area_channel = map_channels_to_regions(ap, ml, az, elevation, depth, n_channels)
-        total_sessions = len(sessions)
-
-        
-        
-        # Generate SWR plots
-        swr_output_dir = data_folder / "swr_plots"
-        swr_output_dir.mkdir(exist_ok=True)
-        
-        chunk_start = 0
-        for i, (session, rsync_time) in enumerate(zip(sessions, rsync_times)):
-            # Get the pre-computed neuropixel sample times
-            session_npx_samples = extended_npx_times[chunk_start : chunk_start + len(rsync_time) + 2]
-            # Special handling for mice 00053 and 00055
-            if mouse_id in ["00053", "00055"]:
-                npx_start = int(session_npx_samples[0])
-                npx_end = npx_start + int(1800 * 2500)  # 30 minutes in samples
-                print(f"Mouse {mouse_id} - forcing 30 minute duration")
-            else:
-            
-                npx_start = int(session_npx_samples[0])
-                npx_end = int(session_npx_samples[-1])
-            
-            print(f"Session {i} loading: {npx_start/2500:.3f}s to {npx_end/2500:.3f}s "
-                f"({(npx_end-npx_start)/2500:.3f}s duration)")
-            print(f"\nSession {i} Timing Verification:")
-            print(f"PyControl times: run_start={session.run_start:.3f}s, run_end={session.run_end:.3f}s")
-            print(f"Neuropixel samples: start={npx_start} ({npx_start/2500:.3f}s), end={npx_end} ({npx_end/2500:.3f}s)")
-            print(f"Duration: {(npx_end-npx_start)/2500:.3f}s (should match {session.run_end-session.run_start:.3f}s)\n")
-            
-            lfp_cache_path = data_folder / f"lfp_cache_{mouse_id}_session{i}.npy"
-            if not lfp_cache_path.exists():
-                lfp = load_lfp_reactivations(
-                    lfp_path,
-                    chunk_start_seconds=npx_start/2500,  # Convert to seconds
-                    chunk_end_seconds=npx_end/2500
-                )
-                np.save(lfp_cache_path, lfp)
-            else:
-                lfp = np.load(lfp_cache_path)
-            
-            print(f"LFP shape: {lfp.shape}")
-            if lfp.ndim != 2:
-                raise ValueError(f"Invalid LFP data shape: {lfp.shape}")
-            
-            area_channel = map_channels_to_regions(ap, ml, az, elevation, depth, n_channels)
-            
-            print(f"\n=== Plotting Parameters for {mouse_id} Session {i} ===")
-            print(f"AP: {ap}  ML: {ml}  AZ: {az}")
-            print(f"Elevation: {elevation}  Depth: {depth}  n_channels: {n_channels}")
-            
-            plot_swr_power_regions(
-                lfp,
-                area_channel,
-                swr_output_dir / f"{mouse_id}_session{i}_swr.png"
-            )
-            
-            chunk_start += len(rsync_time) + 2
-
-        # Cache for phase 2
-        with open(cache_file, 'wb') as f:
-            pickle.dump((sessions, lfp_path, ap, ml, az, elevation, depth, n_channels), f)
-        return []
-
-    # PHASE 2: Generate power plots using cached data
-    elif phase == 2:
-        with open(cache_file, 'rb') as f:
-            sessions, lfp_path, ap, ml, az, elevation, depth, n_channels = pickle.load(f)
-        
-        sessions_list = []
-        aligners = []  # Your existing aligner creation code
-        
-        for i, session in enumerate(sessions):
-            aligner = Rsync_aligner(...)  # Your existing aligner code
-            aligners.append(aligner)
-            
-            # Generate power plots with manual ranges
-            plot_ripple_power_by_channel(
-                lfp_path=lfp_path,
-                mouse=mouse_id,
-                aligner=aligner,
-                session=session,
-                ca1_range=ca1_range,
-                rsc_range=rsc_range,
-                aligner_id=f"{mouse_id}_{session.task_name}_{i}",
-                area_channel=map_channels_to_regions(ap, ml, az, elevation, depth, n_channels)
-            )
-            
-            # Build sessions_list for combined processing
-            sessions_list.append((
-                lfp_path,
-                session,
-                ca1_range,
-                rsc_range,
-                f"{mouse_id}_{session.task_name}_{i}"
-            ))
-        
-        # Run combined processing
-        plot_ripple_power_combined_processing(sessions_list)
-        return sessions_list
 
 def get_sound_videos(
     sounds: List[Sound], camera_frame_times: np.ndarray, video_path: Path

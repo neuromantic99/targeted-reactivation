@@ -48,6 +48,7 @@ class Session:
 
         print("Importing data file: " + os.path.split(file_path)[1])
         self.file_name = os.path.split(file_path)[1]
+        self.times = {}
 
         if os.path.splitext(file_path)[1] == ".txt":
             # Load data from txt file.
@@ -83,7 +84,16 @@ class Session:
             ID2name = {v: k for k, v in {**state_IDs, **event_IDs}.items()}
 
             data_lines = [line[2:].split(" ") for line in all_lines if line[0] == "D"]
+            if not hasattr(self, 'times'):
+                self.times = {}
+            self.run_start = 0  # Timestamps are relative to experiment start
+            if data_lines:  # Only proceed if there are data lines
+                last_time = int(data_lines[-1][1])  # Second element is timestamp
+                self.run_end = last_time  
+            else:
+                self.run_end = 0
 
+            
             self.events = [
                 Event(
                     int(dl[0]) if time_unit == "ms" else int(dl[0]) / 1000,
@@ -94,11 +104,16 @@ class Session:
             ]
 
             self.times = {
-                event_name: np.array(
-                    [ev.time for ev in self.events if ev.name == event_name]
-                )
+                event_name: np.array([ev.time for ev in self.events if ev.name == event_name])
                 for event_name in ID2name.values()
             }
+
+            if 'run_start' not in self.times:
+                self.times['run_start'] = np.array([self.run_start])
+            if 'run_end' not in self.times:
+                self.times['run_end'] = np.array([self.run_end])
+            if 'rsync' not in self.times:
+                self.times['rsync'] = np.array([])
 
             print_lines = [
                 line[2:].split(" ", 1) for line in all_lines if line[0] == "P"
@@ -134,6 +149,21 @@ class Session:
             # Load tsv file to pandas dataframe.
 
             df = pd.read_csv(file_path, delimiter="\t")
+            if not hasattr(self, 'times'):
+                self.times = {}
+            self.run_start = 0
+            self.run_end = 0  # Default value
+            if not df.empty:
+                self.run_end = df['time'].iloc[-1] 
+            
+            # Add to times dictionary
+            self.times.update({
+                'run_start': np.array([self.run_start]),
+                'run_end': np.array([self.run_end]),
+                'rsync': np.array([])  # Initialize empty array for rsync
+            })
+
+            
 
             if time_unit == "ms":
                 df = df.loc[
@@ -166,14 +196,18 @@ class Session:
             ]
 
             self.times = {
-                event_name: np.array(
-                    [ev.time for ev in self.events if ev.name == event_name]
-                )
-                for event_name in df.loc[
-                    df["type"].isin(["state", "event"]), "content"
-                ].unique()
+                event_name: np.array([ev.time for ev in self.events if ev.name == event_name])
+                for event_name in df.loc[df["type"].isin(["state", "event"]), "content"].unique()
             }
 
+
+            if 'run_start' not in self.times:
+                self.times['run_start'] = np.array([self.run_start])
+            if 'run_end' not in self.times:
+                self.times['run_end'] = np.array([self.run_end])
+            if 'rsync' not in self.times:
+                self.times['rsync'] = np.array([])
+            
             self.prints = [
                 Print(row.time, row.subtype, row.content)
                 for row in df.loc[df.type == "print", :].itertuples()
