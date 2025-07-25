@@ -11,7 +11,7 @@ from lfp import plot_ripple_power_by_channel, plot_spectrogram
 from models import LED, Sound
 
 
-from utils import extract_frames_fast, get_number_of_frames, save_video
+from utils import extract_frames_fast, get_data_paths, get_number_of_frames, save_video
 from ripples.utils_npyx import load_sync_npyx, load_lfp_reactivations
 from ripples.utils import threshold_detect
 
@@ -66,16 +66,6 @@ def process_session(session: Session) -> Tuple[List[Sound], List[LED] | None]:
         assert 0.99 < sound.time - led.time < 1.01
 
     return sounds, leds
-
-
-def get_data_paths(
-    data_folder: Path,
-) -> Tuple[List[Path], List[Path], List[Path]]:
-    return (
-        sorted(list(data_folder.glob("*.mp4"))),
-        sorted(list(data_folder.glob("*time.npy"))),
-        sorted(list(data_folder.glob("*.tsv"))),
-    )
 
 
 def main_11153(data_folder: Path, lfp_paths: List[Path]) -> None:
@@ -146,9 +136,12 @@ def main(data_folder: Path, lfp_path: Path) -> None:
         print(
             f"Number of video frames and triggers do not match, this may happen. Got {n_video_frames} video frames, and {n_triggers} triggers"
         )
+    else:
+        print("Woop frame trigger and videos match")
 
     print("Starting lfp load")
     raw_sync_path = Path(f"raw_sync_{mouse}.npy")
+
     if raw_sync_path.exists():
         raw_sync = np.load(raw_sync_path)
     else:
@@ -163,6 +156,23 @@ def main(data_folder: Path, lfp_path: Path) -> None:
 
     assert sum(len(rs) for rs in rsync_times) == len(sync_npx)
 
+    aligners = get_aligners(sync_npx, rsync_times)
+
+    # plot_ripple_power_by_channel(lfp_path=lfp_path, mouse=mouse, aligner=aligners[0])
+
+    # sounds, leds = process_session(session)
+    # n_frames = get_number_of_frames(video_path)
+    # camera_frame_times = np.load(frame_trigger_time_path, allow_pickle=True)
+
+    # # get_sound_videos(sounds, camera_frame_times, video_path)
+    # get_light_videos(leds, camera_frame_times, video_path)
+
+    1 / 0
+
+
+def get_aligners(
+    sync_npx: np.ndarray, rsync_times: List[np.ndarray]
+) -> List[Rsync_aligner]:
     chunk_start = 0
     # A list of Rsync_aligner objects, one for each session
     # So in theory, aligner 0 is the conditioning aligner.
@@ -177,14 +187,8 @@ def main(data_folder: Path, lfp_path: Path) -> None:
         )
 
         chunk_start += len(rsync_time)
-    plot_ripple_power_by_channel(lfp_path=lfp_path, mouse=mouse, aligner=aligners[0])
 
-    # sounds, leds = process_session(session)
-    # n_frames = get_number_of_frames(video_path)
-    # camera_frame_times = np.load(frame_trigger_time_path, allow_pickle=True)
-
-    # # get_sound_videos(sounds, camera_frame_times, video_path)
-    # get_light_videos(leds, camera_frame_times, video_path)
+    return aligners
 
 
 def get_sound_videos(
@@ -268,9 +272,9 @@ if __name__ == "__main__":
     #############################################
 
     ################# 11151 ######################
-    data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-05-19/11151")
-    lfp_path = data_folder / "20250519_g0" / "20250519_g0_imec0"
-    main(data_folder, lfp_path)
+    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-05-19/11151")
+    # lfp_path = data_folder / "20250519_g0" / "20250519_g0_imec0"
+    # main(data_folder, lfp_path)
     #############################################
 
     ################# 11150 ######################
@@ -278,3 +282,50 @@ if __name__ == "__main__":
     # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-05-20/11150")
     # lfp_path = data_folder / "20250520_g0" / "20250520_g0_imec0"
     # main(data_folder, lfp_path)
+
+    ################### 10679 #####################
+    # Single video, but it has the right number of frames
+    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-06-03/10679")
+    # lfp_path = data_folder / "20250603_g0" / "20250603_g0_imec0"
+    # main(data_folder, lfp_path)
+
+    ################### 10681 #####################
+    # This one has over 1 hundred dropped frames in each recording. Could be off by a few seconds
+    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-06-03/10681")
+    # lfp_path = data_folder / "20250603_2_g0" / "20250603_2_g0_imec0"
+    # main(data_folder, lfp_path)
+
+    ################### 00052 ######################
+    # All off by about 50 frames
+    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-06-09")
+    # lfp_path = data_folder / "20250609_g1" / "20250609_g1_imec0"
+    # main(data_folder, lfp_path)
+
+    ################### 10682 ######################
+    # Again about 50 frames off.
+    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-06-10/10682")
+    # lfp_path = data_folder / "20250610_g0" / "20250610_g0_imec0"
+    # main(data_folder, lfp_path)
+
+    ################### 00058 ######################
+    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-06-17/00058")
+    # lfp_path = data_folder / "20250617_g0" / "20250617_g0_imec0"
+    # main(data_folder, lfp_path)
+
+    ################### 00059 ######################
+    # Ok, reactivation perfect, sleep 59 frames off
+    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-06-18/00059")
+    # lfp_path = data_folder / "20250618_g0" / "20250618_g0_imec0"
+    # main(data_folder, lfp_path)
+
+    ################### 00055 ######################
+    # Good, exact number of frames expected. Take the first ones
+    # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-06-19/00055")
+    # lfp_path = data_folder / "20250619_g0" / "20250619_g0_imec0"
+    main(data_folder, lfp_path)
+
+    ################### 00053 ######################
+    # Good, exact number of frames expected. Take the first ones
+    data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-06-20/00053")
+    lfp_path = data_folder / "20250620_g0" / "20250620_g0_imec0"
+    main(data_folder, lfp_path)

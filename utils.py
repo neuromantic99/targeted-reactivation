@@ -1,7 +1,10 @@
 from pathlib import Path
+from typing import List, Tuple
 import ffmpeg
 import numpy as np
 import cv2
+
+from rsync import Rsync_aligner
 
 
 def get_number_of_frames(video_path: Path) -> int:
@@ -28,7 +31,7 @@ def extract_frames_fast(video_path: Path, frame_indices: np.ndarray) -> np.ndarr
 
 def save_video(
     frames: np.ndarray, output_path: str = "output.mp4", fps: int = 30
-) -> Hi:
+) -> None:
     """
     Save a NumPy array of frames as an MP4 video using FFmpeg.
 
@@ -66,3 +69,34 @@ def save_video(
 
     process.stdin.close()
     process.wait()
+
+
+def get_data_paths(
+    data_folder: Path,
+) -> Tuple[List[Path], List[Path], List[Path]]:
+    return (
+        sorted(list(data_folder.glob("*.mp4"))),
+        sorted(list(data_folder.glob("*time.npy"))),
+        sorted(list(data_folder.glob("*.tsv"))),
+    )
+
+
+def get_aligners(
+    sync_npx: np.ndarray, rsync_times: List[np.ndarray]
+) -> List[Rsync_aligner]:
+    chunk_start = 0
+    # A list of Rsync_aligner objects, one for each session
+    # So in theory, aligner 0 is the conditioning aligner.
+    aligners = []
+    for rsync_time in rsync_times:
+        aligners.append(
+            Rsync_aligner(
+                sync_npx[chunk_start : chunk_start + len(rsync_time)],
+                rsync_time,
+                raise_exception=True,
+            )
+        )
+
+        chunk_start += len(rsync_time)
+
+    return aligners
