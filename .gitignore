@@ -1,4 +1,5 @@
 *.npy
+*.json
 
 .DS_Store
 *.mp4

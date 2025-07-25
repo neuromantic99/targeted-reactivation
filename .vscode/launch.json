@@ -10,6 +10,16 @@
       "justMyCode": false,
       "env": {"PYDEVD_WARN_SLOW_RESOLVE_TIMEOUT": "10"},
     },
+
+    {
+      "name": "spikes analysis",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "analysis_spikes.py",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {"PYDEVD_WARN_SLOW_RESOLVE_TIMEOUT": "10"},
+    },
     {
       "name": "vdieo itme",
       "type": "debugpy",
