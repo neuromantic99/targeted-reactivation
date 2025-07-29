@@ -8,43 +8,6 @@ sns.set_theme(style="white", palette="muted")
 COLORS = sns.color_palette()
 
 
-def plot_stim_triggered_average(
-    stim_times: np.ndarray,
-    stim_labels: np.ndarray,
-    spikes: np.ndarray,
-    spike_clusters: np.ndarray,
-) -> None:
-
-    window = 0.5  # seconds
-    sampling_rate = 30000  # Hz
-
-    n_bins = 51
-    bin_edges = np.linspace(-window * sampling_rate, window * sampling_rate, n_bins)
-    result = []
-
-    for onset in stim_times:
-        start = onset - window * sampling_rate
-        end = onset + window * sampling_rate
-        idx_trial = (spikes >= start) & (spikes <= end)
-        trial_spikes = spikes[idx_trial]
-        trial_clusters = spike_clusters[idx_trial]
-
-        trial_result = np.zeros((max(spike_clusters) + 1, n_bins - 1))
-
-        for cluster in np.unique(trial_clusters):
-            cluster_spikes = trial_spikes[trial_clusters == cluster]
-            binned = np.histogram(cluster_spikes - onset, bins=bin_edges)[0]
-            trial_result[cluster, :] = binned
-
-        result.append(trial_result)
-
-    # (n_trials x n_clusters x n_bins)
-    result = np.array(result)
-    # plot_individual_cell_results(result, stim_labels, sampling_rate, n_bins, bin_edges)
-
-    plot_cell_summed_results(stim_labels, sampling_rate, n_bins, bin_edges, result)
-
-
 def plot_individual_cell_results(
     result: np.ndarray,
     stim_labels: np.ndarray,
@@ -93,19 +56,18 @@ def plot_individual_cell_results(
 
 
 def plot_cell_summed_results(
+    trial_array: np.ndarray,
     stim_labels: np.ndarray,
     sampling_rate: int,
     n_bins: int,
     bin_edges: np.ndarray,
-    result: np.ndarray,
 ) -> None:
-
-    result = np.sum(result, axis=1)
-    baseline = np.mean(result[:, : n_bins // 2], axis=1)
-    result -= baseline[:, np.newaxis]
+    trial_array = np.sum(trial_array, axis=1)
+    baseline = np.mean(trial_array[:, : n_bins // 2], axis=1)
+    trial_array -= baseline[:, np.newaxis]
 
     bin_width = (bin_edges[1] - bin_edges[0]) / sampling_rate
-    result /= bin_width
+    trial_array /= bin_width
 
     midpoints = (bin_edges[:-1] + bin_edges[1:]) / 2
 
@@ -115,7 +77,7 @@ def plot_cell_summed_results(
         mask = stim_labels == stim_type
 
         shaded_line_plot(
-            result[mask, :],
+            trial_array[mask, :],
             midpoints / sampling_rate,
             color=COLORS[idx],
             label=stim_type,
@@ -134,7 +96,6 @@ def shaded_line_plot(
     color: str,
     label: str,
 ) -> None:
-
     mean = np.mean(arr, 0)
     sem = np.std(arr, 0) / np.sqrt(arr.shape[1])
     plt.plot(x_axis, mean, color=color, label=label, marker="", zorder=1)

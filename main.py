@@ -29,7 +29,6 @@ HERE = Path(__file__).parent
 
 
 def process_session(session: Session) -> Tuple[List[Sound], List[LED] | None]:
-
     sound_prints = [
         printed
         for printed in session.prints
@@ -40,7 +39,7 @@ def process_session(session: Session) -> Tuple[List[Sound], List[LED] | None]:
         for sound in sound_prints
     ]
 
-    if session.task_name == "sleeping":
+    if session.task_name == "sleeping_alex":
         return sounds, None
 
     led_prints = [
@@ -82,7 +81,6 @@ def main_11153(data_folder: Path, lfp_paths: List[Path]) -> None:
 
     raw_sync = []
     for idx, lfp_path in enumerate(lfp_paths):
-
         raw_sync_path = Path(f"raw_sync_{idx}_{mouse}.npy")
         if raw_sync_path.exists():
             raw_sync.append(np.load(f"raw_sync_{idx}_{mouse}.npy"))
@@ -261,7 +259,6 @@ def test_suraya_data() -> None:
 
 
 if __name__ == "__main__":
-
     ################# 11153 ######################
     # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-05-18/11153")
     # lfp_paths = [
