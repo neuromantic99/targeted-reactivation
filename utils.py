@@ -4,6 +4,8 @@ import ffmpeg
 import numpy as np
 import cv2
 
+from data_import import Session
+from models import LED, Sound
 from rsync import Rsync_aligner
 
 
@@ -100,3 +102,42 @@ def get_aligners(
         chunk_start += len(rsync_time)
 
     return aligners
+
+
+def process_session(session: Session) -> Tuple[List[Sound], List[LED] | None]:
+    sound_prints = [
+        printed
+        for printed in session.prints
+        if printed.string.startswith("Deliverying sound frequency")
+    ]
+    sounds = [
+        Sound(sound.time, int(sound.string.split("Deliverying sound frequency ")[1]))
+        for sound in sound_prints
+    ]
+
+    if session.task_name == "sleeping_alex":
+        return sounds, None
+
+    led_prints = [
+        printed
+        for printed in session.prints
+        if printed.string.startswith("Turning on LED Color")
+    ]
+
+    leds = [
+        LED(led.time, led.string.split("Turning on LED Color: ")[1])
+        for led in led_prints
+    ]
+    # Session stopped in between the two stims
+    if len(leds) - len(sounds) == 1:
+        # Remove the last LED
+        # TODO: add a check that they pair correctly
+        leds = leds[:-1]
+
+    for sound, led in zip(sounds, leds, strict=True):
+        # Should be image then audio
+        assert led.time < sound.time
+
+        assert 0.99 < sound.time - led.time < 1.01
+
+    return sounds, leds

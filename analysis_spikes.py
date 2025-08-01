@@ -1,7 +1,6 @@
-from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import List, Tuple
+from pathlib import Path, PureWindowsPath
+from typing import Dict, List, Tuple
 
-from lightgbm import LGBMClassifier
 from matplotlib import pyplot as plt
 import numpy as np
 from scipy.stats import ttest_ind
@@ -10,9 +9,12 @@ import seaborn as sns
 from sklearn.ensemble import RandomForestClassifier
 from data_import import Session
 from scipy.stats import zscore
-from main import process_session
 from rsync import Rsync_aligner
-from utils import get_aligners, get_data_paths
+from utils import get_aligners, get_data_paths, process_session
+from sklearn.preprocessing import minmax_scale
+
+
+from scipy.ndimage import gaussian_filter1d
 
 from ripples.utils_npyx import load_sync_npyx
 from ripples.utils import threshold_detect
@@ -22,6 +24,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import cross_val_score, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from sklearn.feature_selection import SelectKBest, mutual_info_classif
+
+HERE = Path(__file__).parent
 
 
 def load_spiking_data(
@@ -66,6 +70,55 @@ def split_data_by_trial(
     spike_clusters: np.ndarray,
     window: float,
     n_bins: int,
+    sampling_rate: int = 30_000,
+) -> np.ndarray:
+    # Precompute actual clusters and mapping
+    actual_clusters = np.unique(spike_clusters)
+    cluster_to_idx = {c: i for i, c in enumerate(actual_clusters)}
+    n_clusters = len(actual_clusters)
+
+    # Calculate window in samples and create bin edges
+    window_samples = window * sampling_rate
+    bin_edges = np.linspace(-window_samples, window_samples, n_bins + 1)
+
+    result = []
+
+    for onset in stim_times:
+        start = onset - window_samples
+        end = onset + window_samples
+        # Use half-open interval [start, end) to match histogram behavior
+        mask = (spikes >= start) & (spikes < end)
+        trial_spikes = spikes[mask]
+        trial_clusters = spike_clusters[mask]
+
+        # Initialize array with correct dimensions
+        trial_result = np.zeros((n_clusters, n_bins))
+
+        # Process each cluster present in the trial
+        for cluster in np.unique(trial_clusters):
+            # Get relative spike times for this cluster
+            cluster_spikes = trial_spikes[trial_clusters == cluster]
+            rel_times = cluster_spikes - onset
+
+            # Bin the relative spike times
+            binned, _ = np.histogram(rel_times, bins=bin_edges)
+
+            # Store using cluster index mapping
+            idx = cluster_to_idx[cluster]
+            trial_result[idx, :] = binned
+
+        result.append(trial_result)
+
+    return np.array(result)
+
+
+def split_data_by_trial_old(
+    stim_times: np.ndarray,
+    spikes: np.ndarray,
+    spike_clusters: np.ndarray,
+    window: float,
+    n_bins: int,
+    sampling_rate: int = 30_000,
 ) -> np.ndarray:
     """Split the spike data into trials based on stimulus times.
 
@@ -73,7 +126,6 @@ def split_data_by_trial(
     """
 
     result = []
-    sampling_rate = 30_000
     bin_edges = np.linspace(-window * sampling_rate, window * sampling_rate, n_bins)
 
     for onset in stim_times:
@@ -126,8 +178,106 @@ def get_ca1_rsc_mapping(kilosort_path: Path) -> Tuple[int, int, int, int]:
     raise ValueError(f"Could not find mapping for kilosort path {kilosort_path}. ")
 
 
-def main(data_path: Path, kilosort_path: Path) -> None:
+def process_mouse(
+    data_path: Path,
+    kilosort_paths: List[Path],
+    C: float,
+    penalty: str,
+    solver: str,
+    offset: int = 0,
+) -> None:
 
+    subject = data_path.parts[-1]
+
+    print("=" * 20)
+
+    save_path = HERE / "results" / "trial_arrays"
+    redo = False
+
+    if (save_path / f"{subject}_training_array.npy").exists() and not redo:
+        print(f"Loading existing data for {subject}")
+        training_array = np.load(save_path / f"{subject}_training_array.npy")
+        testing_array = np.load(save_path / f"{subject}_testing_array.npy")
+        training_labels = np.load(save_path / f"{subject}_training_labels.npy")
+        testing_labels = np.load(save_path / f"{subject}_testing_labels.npy")
+    else:
+        training_arrays = []
+        training_labels = []
+        testing_arrays = []
+        testing_labels = []
+
+        for kilosort_path in kilosort_paths:
+
+            train_array, y_train, test_array, y_test = process_probe(
+                data_path,
+                kilosort_path,
+            )
+            training_arrays.append(train_array)
+            training_labels.append(y_train)
+            testing_arrays.append(test_array)
+            testing_labels.append(y_test)
+
+        training_array = np.concatenate(training_arrays, axis=1)
+        testing_array = np.concatenate(testing_arrays, axis=1)
+        np.save(
+            save_path / f"{subject}_training_array.npy",
+            training_array,
+        )
+        np.save(
+            save_path / f"{subject}_testing_array.npy",
+            testing_array,
+        )
+        np.save(
+            save_path / f"{subject}_training_labels.npy",
+            training_labels,
+        )
+        np.save(
+            save_path / f"{subject}_testing_labels.npy",
+            testing_labels,
+        )
+
+    if len(training_labels) > 1:
+        assert np.array_equal(training_labels[0], training_labels[1])
+        assert np.array_equal(testing_labels[0], testing_labels[1])
+
+    get_sleep_state(data_path)
+
+    model, label_encoder, awake_score = get_awake_classifier(
+        training_array,
+        training_labels[0],
+        C=C,
+        penalty=penalty,
+        solver=solver,
+    )
+
+    trial_states = get_sleep_state(data_path)
+
+    assert len(trial_states) == testing_array.shape[0]
+    trials_keep = np.isin(trial_states, ["nrem", "deep nrem"])
+
+    print(
+        f"Keeping {np.sum(trials_keep)} trials out of {len(trial_states)} based on sleep state."
+    )
+
+    testing_array = testing_array[trials_keep, :, :]
+    testing_labels = testing_labels[0][trials_keep]
+
+    if len(testing_labels) == 0:
+        pass
+
+    score, shuffled_scores = fit_classifier_to_sleeping_data(
+        testing_array, testing_labels, model, label_encoder, offset=offset
+    )
+
+    np.save(HERE / "results" / f"{subject}_classifier_score.npy", score)
+    np.save(HERE / "results" / f"{subject}_shuffled_scores.npy", shuffled_scores)
+    np.save(HERE / "results" / f"{subject}_awake_scores.npy", awake_score)
+
+
+def process_probe(
+    data_path: Path,
+    kilosort_path: Path,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     CA1_Low, CA1_High, RSC_Low, RSC_High = get_ca1_rsc_mapping(kilosort_path)
     print(f"CA1: {CA1_Low} - {CA1_High}, RSC: {RSC_Low} - {RSC_High}")
 
@@ -141,12 +291,16 @@ def main(data_path: Path, kilosort_path: Path) -> None:
         npx_sync_times = np.load(kilosort_path.parent / "high_pass_sync.npy")
     else:
         sync = load_sync_npyx(str(kilosort_path.parent), filt_key="highpass")
-        npx_sync_times = threshold_detect(sync, 0.5)
+        npx_sync_times = (
+            threshold_detect(sync, 0.5)
+            if "00053" not in str(kilosort_path)
+            else threshold_detect(sync[:, 6], 0.5)
+        )
         np.save(kilosort_path.parent / "high_pass_sync.npy", npx_sync_times)
 
-    assert sum(len(rsync) for rsync in rsync_times) == len(
-        npx_sync_times
-    ), "Rsync times and NPX sync times do not match in length."
+    # assert sum(len(rsync) for rsync in rsync_times) == len(
+    #     npx_sync_times
+    # ), "Rsync times and NPX sync times do not match in length."
     aligners = get_aligners(npx_sync_times, rsync_times)
     spike_times, spike_clusters, labels, closest_channel = load_spiking_data(
         kilosort_path
@@ -160,54 +314,126 @@ def main(data_path: Path, kilosort_path: Path) -> None:
     #     (closest_channel >= RSC_Low) & (closest_channel <= RSC_High)
     # )
 
+    # idx_keep = (closest_channel >= CA1_Low) & (closest_channel <= CA1_High)
     # idx_keep = labels == "good"
 
     good = spike_times[idx_keep]
     spike_clusters = spike_clusters[idx_keep]
     print(f"Number of clusters : {len(np.unique(spike_clusters))}")
 
-    n_bins = 101
-    window = 0.1  # seconds
-
-    model, label_encoder = get_awake_classifier(
-        sessions,
-        aligners,
-        spike_clusters,
-        good,
-        n_bins=n_bins,
-        window=window,
+    n_bins = 100
+    window = 0.9  # seconds
+    train_array, y_train = get_training_data(
+        sessions, aligners, spike_clusters, good, n_bins, window
     )
 
-    fit_classifier_to_sleeping_data(
-        sessions,
-        aligners,
-        spike_clusters,
-        label_encoder,
-        model,
-        good,
-        n_bins=n_bins,
-        window=window,
+    test_array, y_test = get_testing_data(
+        sessions, aligners, spike_clusters, good, n_bins, window
     )
+    return train_array, y_train, test_array, y_test
+
+
+def normalize_trial_array(trial_array: np.ndarray) -> np.ndarray:
+    """Normalize the trial array by z-scoring each cluster across trials."""
+    for trial_idx in range(trial_array.shape[0]):
+        trial = trial_array[trial_idx, :, :]
+        # Baseline the trial to the average of the first half of the bins
+        # trial -= trial[:, : trial.shape[1] // 2].mean(axis=1, keepdims=True)
+        trial = zscore(trial, axis=1)
+        trial[np.isnan(trial)] = 0  # Replace NaNs with 0
+        # trial = gaussian_filter1d(trial, sigma=3, axis=1)
+        trial_array[trial_idx, :, :] = trial
+
+    return trial_array
 
 
 def fit_classifier_to_sleeping_data(
+    trial_array: np.ndarray,
+    y: np.ndarray,
+    awake_model: LogisticRegression,
+    label_encoder: LabelEncoder,
+    plot: bool = False,
+    offset: int = 0,
+) -> Tuple[float, List[float]]:
+
+    X = X_from_trial_array(trial_array, offset=offset)
+
+    # Sum across the post stimulus bins
+
+    # Blue -> 3000, Orange -> 8000
+    blue_encoding, orange_encoding = label_encoder.transform(["blue", "orange"])
+
+    y_encoded = np.array(
+        [
+            (
+                blue_encoding
+                if sound == 3000
+                else orange_encoding if sound == 8000 else None
+            )
+            for sound in y
+        ]
+    )
+
+    assert np.all(
+        y_encoded is not None
+    ), "Some sounds do not have a valid frequency encoding."
+
+    assert not np.all(
+        y_encoded == y_encoded[0]
+    ), "All labels are the same. Cannot compute score."
+
+    result = awake_model.predict(X)
+    print(f"Predicted labels: {result}")
+    score = np.sum(y_encoded == result) / len(y_encoded)
+
+    rolling_score = np.convolve(y_encoded == result, np.ones(10) / 10, mode="valid")
+    # plt.figure()
+    # plt.plot(rolling_score, label="Rolling score")
+    print(f"Classifier score on sleeping data: {score:.2f}")
+
+    shuffled_scores = []
+    rolling_shuffled_scores = []
+    for _ in range(1000):
+        shuffle_idx = np.random.permutation(len(y_encoded))
+        X_shuffled = X[shuffle_idx, :]
+        result_shuffled = awake_model.predict(X_shuffled)
+        shuffled_scores.append(np.sum(y_encoded == result_shuffled) / len(y_encoded))
+        rolling_shuffled_scores.append(
+            np.convolve(y_encoded == result_shuffled, np.ones(10) / 10, mode="valid")
+        )
+
+    rolling_shuffled_scores = np.array(rolling_shuffled_scores)
+
+    if plot:
+        plt.figure()
+        plt.hist(shuffled_scores, bins=15, alpha=0.5, label="Shuffled scores")
+        plt.axvline(score, color="red", label="Original score")
+        plt.title(
+            f"Z = {(score - np.mean(shuffled_scores)) / np.std(shuffled_scores):.2f}"
+        )
+
+    # return score, shuffled_scores
+    zscore = (score - np.mean(shuffled_scores)) / np.std(shuffled_scores)
+    assert not np.isnan(zscore), "Z-score is NaN. Likely only one label is predicted"
+    return zscore, shuffled_scores
+
+
+def get_testing_data(
     sessions: List[Session],
     aligners: List[Rsync_aligner],
     spike_clusters: np.ndarray,
-    label_encoder: LabelEncoder,
-    awake_model: LogisticRegression,
     good: np.ndarray,
-    n_bins: int = 51,
-    window: float = 0.5,
-) -> None:
+    n_bins: int,
+    window: float,
+) -> Tuple[np.ndarray, np.ndarray]:
 
     session_index = 2
-
     sounds, _ = process_session(sessions[session_index])
 
     sounds_times = aligners[session_index].B_to_A(
-        np.array([sound.time for sound in sounds]), extrapolate=False
+        np.array([sound.time for sound in sounds]), extrapolate=True
     )
+    assert np.all(np.isclose((np.diff(sounds_times) / 30000), 11.5, atol=0.01))
 
     trial_array = split_data_by_trial(
         stim_times=sounds_times,
@@ -217,67 +443,90 @@ def fit_classifier_to_sleeping_data(
         n_bins=n_bins,
     )
 
+    return trial_array, np.array([sound.frequency for sound in sounds])
+
+
+def X_from_trial_array(trial_array: np.ndarray, offset: int = 0) -> np.ndarray:
     # (n_trials, n_clusters, n_bins)
     # Transform to (n_samples, n_features)
-    # Sum across the post stimulus bins
-    X = trial_array[:, :, n_bins // 2 :].sum(axis=2)
+    normalize_trial_array(trial_array)
+    n_bins = trial_array.shape[2]
+    print(trial_array.shape)
+    start = (n_bins // 2) + offset
+    start -= 2
 
-    # Blue -> 3000, Orange -> 8000
-
-    blue_encoding, orange_encoding = label_encoder.transform(["blue", "orange"])
-
-    y = np.array(
-        [
-            (
-                blue_encoding
-                if sound.frequency == 3000
-                else orange_encoding if sound.frequency == 8000 else None
-            )
-            for sound in sounds
-        ]
-    )
-    assert np.all(y is not None), "Some sounds do not have a valid frequency encoding."
-
-    result = awake_model.predict(X)
-    score = np.sum(y == result) / len(y)
-    print(f"Classifier score on sleeping data: {score:.2f}")
-
-    shuffled_scores = []
-    for _ in range(1000):
-        shuffle_idx = np.random.permutation(len(y))
-        X_shuffled = X[shuffle_idx, :]
-        result_shuffled = awake_model.predict(X_shuffled)
-        shuffled_scores.append(np.sum(y == result_shuffled) / len(y))
-
-    plt.hist(shuffled_scores, bins=15, alpha=0.5, label="Shuffled scores")
-    plt.axvline(score, color="red", label="Original score")
-    plt.title(f"Z = {(score - np.mean(shuffled_scores)) / np.std(shuffled_scores):.2f}")
-
-    subject = sessions[0].subject_ID
-    here = Path(__file__).parent
-    if (here / "results" / f"{subject}_classifier_score.npy").exists():
-        subject += "_1"
-    np.save(here / "results" / f"{subject}_classifier_score.npy", score)
-    np.save(here / "results" / f"{subject}_shuffled_scores.npy", shuffled_scores)
+    end = start + 10
+    X = trial_array[:, :, start:end]
+    # return X.reshape(X.shape[0], -1)
+    return X.mean(axis=2)
 
 
 def get_awake_classifier(
+    trial_array: np.ndarray, y: np.ndarray, C: float, penalty: str, solver: str
+) -> Tuple[LogisticRegression, LabelEncoder, float]:
+
+    X = X_from_trial_array(trial_array)
+
+    # (n_trials, n_clusters, n_bins)
+    # Transform to (n_samples, n_features)
+    # Sum across the post stimulus bins
+
+    le = LabelEncoder()
+    y_encoded = le.fit_transform(y)
+
+    model = LogisticRegression(
+        penalty=penalty,
+        solver=solver,
+        C=C,
+        l1_ratio=0.5 if penalty == "elasticnet" else None,
+        fit_intercept=True,
+    )
+
+    cv = StratifiedKFold(n_splits=5, shuffle=True)
+    scores = cross_val_score(model, X, y_encoded, cv=cv, scoring="accuracy")
+
+    print("Mean 5-fold accuracy:", scores.mean())
+
+    model = LogisticRegression(
+        penalty=penalty,
+        solver=solver,
+        C=C,
+        l1_ratio=0.5 if penalty == "elasticnet" else None,
+        fit_intercept=True,
+    )
+
+    model.fit(X, y_encoded)
+    return model, le, scores.mean()
+
+
+def get_training_data(
     sessions: List[Session],
     aligners: List[Rsync_aligner],
     spike_clusters: np.ndarray,
     good: np.ndarray,
-    n_bins: int = 51,
-    window: float = 0.5,
-) -> Tuple[LogisticRegression, LabelEncoder]:
-
+    n_bins: int,
+    window: float,
+) -> Tuple[np.ndarray, np.ndarray]:
     session_index = 0
 
     _, LEDs = process_session(sessions[session_index])
     assert LEDs is not None
 
     LEDs_times = aligners[session_index].B_to_A(
-        np.array([led.time for led in LEDs]), extrapolate=False
+        np.array([led.time for led in LEDs]), extrapolate=True
     )
+
+    colors = np.array([led.color for led in LEDs])
+
+    # Not sure why this happened, only trial in one mouse on one probe so probably fine but still...
+    if np.sum(np.isnan(LEDs_times)) == 1:
+        print(
+            f"Warning: NaN value in LEDs times for mouse {sessions[session_index].subject_ID}. Patching as a temporary fix."
+        )
+        nan_idx = np.where(np.isnan(LEDs_times))[0][0]
+        LEDs_times[nan_idx] = LEDs_times[nan_idx - 1] + 11.5 * 30000
+
+    assert np.all(np.isclose((np.diff(LEDs_times) / 30000), 11.5, atol=0.01))
 
     trial_array = split_data_by_trial(
         stim_times=LEDs_times,
@@ -287,117 +536,154 @@ def get_awake_classifier(
         n_bins=n_bins,
     )
 
-    # (n_trials, n_clusters, n_bins)
-    # Transform to (n_samples, n_features)
-    # Sum across the post stimulus bins
-
-    X = trial_array[:, :, n_bins // 2 :].sum(axis=2)
-    y = np.array([led.color for led in LEDs])
-
-    le = LabelEncoder()
-    y_encoded = le.fit_transform(y)
-
-    C = 0.1  # Regularization strength for Logistic Regression
-    solver = "liblinear"  # Solver for Logistic Regression
-    penalty = "l1"
-    model = LogisticRegression(penalty=penalty, solver=solver, C=C)
-
-    cv = StratifiedKFold(n_splits=5, shuffle=True)
-    scores = cross_val_score(model, X, y_encoded, cv=cv, scoring="accuracy")
-
-    print("Mean 5-fold accuracy:", scores.mean())
-    np.save(Path(__file__).parent / "results" / "awake_classifier_scores.npy", scores)
-
-    model = LogisticRegression(penalty=penalty, solver=solver, C=C)
-
-    model.fit(X, y_encoded)
-    return model, le
+    return (
+        trial_array,
+        colors,
+    )
 
 
-def plot_processed_data() -> None:
+def plot_processed_data() -> float:
     results_path = Path(__file__).parent / "results"
     mice = set([file.stem.split("_")[0] for file in results_path.glob("*.npy")])
     WT_scores = []
     NLGF_scores = []
+    awake_scores = []
 
     for mouse in mice:
-        score1 = np.load(results_path / f"{mouse}_classifier_score.npy").item()
-        score2_path = results_path / f"{mouse}_1_classifier_score.npy"
-        if not score2_path.exists():
-            print(
-                f"Warning: {score2_path} does not exist, using only {mouse}_classifier_score.npy"
-            )
+        print("AHHHH PUT ME BACK")
+        if mouse in ["11153", "00058"]:
+            continue
+        score = np.load(results_path / f"{mouse}_classifier_score.npy").item()
+        awake_scores.append(np.load(results_path / f"{mouse}_awake_scores.npy").item())
 
-        total_score = (
-            np.mean([score1, np.load(score2_path).item()])
-            if score2_path.exists()
-            else score1
-        )
         if mouse[:3] == "000":
-            WT_scores.append(total_score)
+            WT_scores.append(score)
         else:
-            NLGF_scores.append(total_score)
+            NLGF_scores.append(score)
 
-    # WT_scores = []
-    # NLGF_scores = []
-    # WT_shuffles = []
-    # NLGF_shuffles = []
-    # for file in results_path.glob("*.npy"):
-    #     genotype = "WT" if file.stem.split("_")[0][:3] == "000" else "NLGF/S305N"
-    #     if "classifier_score" in file.stem and "awake" not in file.stem:
-    #         score = np.load(file)
-    #         if genotype == "WT":
-    #             WT_scores.append(score.item())
-    #         else:
-    #             NLGF_scores.append(score.item())
-    #     if "shuffled_scores" in file.stem and "awake" not in file.stem:
-    #         shuffled_scores = np.load(file)
-    #         if genotype == "WT":
-    #             WT_shuffles.extend(shuffled_scores)
-    #         else:
-    #             NLGF_shuffles.extend(shuffled_scores)
-
+    plt.figure()
     sns.boxplot(data={"WT": WT_scores, "NLGF/S305N": NLGF_scores}, showfliers=False)
-    plt.title(
-        f"Classifier scores by genotype (p = {ttest_ind(WT_scores, NLGF_scores).pvalue:.3f})"
+    sns.stripplot(
+        data={"WT": WT_scores, "NLGF/S305N": NLGF_scores},
+        jitter=True,
+        color="black",
     )
-    plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
+
+    plt.axhline(0, color="red", linestyle="--", label="Chance level")
     plt.legend()
-    # plt.show()
-    # plt.figure()
-    # plt.hist(
-    #     WT_shuffles, bins=15, alpha=0.5, label="WT shuffled", color="blue", density=True
-    # )
-    # plt.axvline(np.mean(WT_scores), color="red", linestyle="--", label="WT mean")
+    return np.mean(awake_scores)
 
-    # plt.figure()
 
-    # plt.hist(
-    #     NLGF_shuffles,
-    #     bins=15,
-    #     alpha=0.5,
-    #     label="WT shuffled",
-    #     color="blue",
-    #     density=True,
-    # )
-    # plt.axvline(np.mean(NLGF_scores), color="red", linestyle="--", label="NLGF mean")
-    1 / 0
+def main() -> None:
+
+    umbrella = Path("/Volumes/MarcBusche/Alex/Reactivations")
+    kilosort_paths = list(umbrella.rglob("*/kilosort4"))
+    path_dict: Dict[str, List[Path]] = {}
+    if len(kilosort_paths) == 0:
+        raise FileNotFoundError(
+            "No kilosort paths found. Please check the path to the data."
+        )
+    for kilosort_path in kilosort_paths:
+        mouse = kilosort_path.parts[-4]
+        # This mouse has bad data, see email
+        print("AHHHH PUT ME BACK")
+        if mouse in ["11153", "00058"]:
+            continue
+        if mouse not in path_dict:
+            path_dict[mouse] = []
+        path_dict[mouse].append(kilosort_path)
+
+    solver = "saga"  # Solver for Logistic Regression
+    penalty = "l1"
+
+    for C in [0.5, 1, 10]:
+
+        for mouse, kilosort_paths in path_dict.items():
+
+            # if mouse[:3] != "000":
+            #     continue
+
+            assert all(
+                [
+                    (kilosort_path / "spike_times.npy").exists()
+                    for kilosort_path in kilosort_paths
+                ]
+            )
+            data_path = kilosort_paths[0].parent.parent.parent
+            process_mouse(data_path, kilosort_paths, C, penalty, solver, offset=0)
+
+        awake_score = plot_processed_data()
+        plt.title(
+            f"C = {C}, penalty = {penalty}, solver = {solver}, awake = {awake_score: .2f} offset = {0}"
+        )
+
+    plt.show()
+
+
+def get_sleep_state(data_path: Path) -> np.ndarray:
+
+    num_to_state = {0.5: "nrem", 0: "deep nrem", 1: "rem", 2: "awake", 4: "movement"}
+
+    _, _, pycontrol_files = get_data_paths(data_path)
+    sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
+    tone_session = sessions[2]
+    trial_starts = tone_session.times["trial_start"]
+    sound_on = tone_session.times["sound_on"]
+    if len(trial_starts) != len(sound_on):
+        # Session stopped in between a trial start and a sound
+        # Remove the final trial start, then check this logic is correct
+        trial_starts = trial_starts[:-1]
+        assert len(trial_starts) == len(sound_on)
+        assert np.allclose(sound_on - trial_starts, 11, atol=0.01)
+    trial_ends = trial_starts[1:]
+    trial_ends = np.append(trial_ends, trial_starts[-1] + 11.5)
+
+    assert np.allclose(trial_ends - trial_starts, 11.5, atol=0.01)
+
+    mouse = data_path.parts[-1]
+
+    spreadsheet_path = Path(
+        "/Volumes/MarcBusche/Alex/Reactivations/Sleep Scoring/results"
+    )
+    spreadsheets = list(spreadsheet_path.glob(f"*.xlsx"))
+    mouse_sheets = [
+        file_name
+        for file_name in spreadsheets
+        if mouse in str(file_name).lower() and "tones" in str(file_name).lower()
+    ]
+    assert (
+        len(mouse_sheets) == 1
+    ), f"Expected one sleep scoring spreadsheet for mouse {mouse}, found {len(mouse_sheets)}."
+    spreadsheet = mouse_sheets[0]
+
+    data = pd.read_excel(spreadsheet, sheet_name="Sheet1")
+    # assert str(data.Mouse[0]) == mouse
+
+    mins = data["Minutes"].to_numpy()
+    seconds = data["Seconds"].to_numpy()
+    total_seconds = mins * 60 + seconds
+
+    trial_start_idx = np.array(
+        [np.argmin(np.abs(total_seconds - start)) for start in trial_starts]
+    )
+
+    assert np.all(np.isin(np.diff(trial_start_idx), [11, 12]))
+
+    trial_end_idx = np.array(
+        [np.argmin(np.abs(total_seconds - end)) for end in trial_ends]
+    )
+    trial_states = []
+
+    for start, end in zip(trial_start_idx, trial_end_idx, strict=True):
+        states = data["Score"][start:end].to_numpy()
+        assert not np.any(np.isnan(states))
+        if np.all(states == states[0]):
+            trial_states.append(num_to_state[states[0]])
+        else:
+            trial_states.append("mixed")
+
+    return np.array(trial_states)
 
 
 if __name__ == "__main__":
-    plot_processed_data()
-
-    # umbrella = Path("/Volumes/MarcBusche/Alex/Reactivations")
-
-    # for kilosort_path in umbrella.rglob("*/kilosort4"):
-    #     if not (kilosort_path / "spike_times.npy").exists():
-    #         print(f"Skipping {kilosort_path} as it does not contain spike_times.npy")
-    #         continue
-    #     print(f"Processing {kilosort_path}")
-    #     data_path = kilosort_path.parent.parent.parent
-
-    #     try:
-    #         main(data_path, kilosort_path)
-    #     except Exception as e:
-    #         print(f"Error processing {kilosort_path}: {e}")
-    #         continue
+    main()
