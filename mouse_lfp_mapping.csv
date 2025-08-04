@@ -1,0 +1,3 @@
+Probe,mouse_id,lfp_path,Cache,AP,ML,AZ,elevation,depth,n_channels,New Depth,CA1_Low,CA1_High,RSC_Low,RSC_High,OB_Low,OB_High
+A,00059,Z:\Alex\Reactivations\2025-06-18\00059\20250618_g0\20250618_g0_imec0,Z:\Alex\Reactivations\2025-06-18\00059\cache_probeA,-2062,500,90,60,3200,384,2875,110,120,262,272,285,384
+B,00059,Z:\Alex\Reactivations\2025-06-18\00059\20250618_g0\20250618_g0_imec1,Z:\Alex\Reactivations\2025-06-18\00059\cache_probeB,-2300,-600,270,60,3200,384,2860,100,110,246,256,285,384
