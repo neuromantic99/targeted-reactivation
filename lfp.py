@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import List
+from typing import Dict, Tuple, Any
 
 import traceback
 from scipy import signal
@@ -77,7 +78,7 @@ def process_region(channels, region_name):
             return np.zeros(1000), np.zeros(1000)
         
     
-def calculate_robust_limits(data, percentile=95):
+def calculate_robust_limits_old(data, percentile=95):
     """
     Calculate axis limits that exclude extreme outliers
     
@@ -96,7 +97,7 @@ def calculate_robust_limits(data, percentile=95):
     buffer = 0.3 * (upper - lower)
     return max(0, lower - buffer), upper + buffer
 
-def calculate_segments(total_samples, max_segments=4):
+def calculate_segments_old(total_samples, max_segments=4):
     segment_length = 2500 * 60 * 10  # 10 minutes in samples
     n_full_segments = total_samples // segment_length
     remainder = total_samples % segment_length
@@ -110,7 +111,7 @@ def calculate_segments(total_samples, max_segments=4):
     
     return min(max_segments, n_segments)
 
-def plot_ripple_power_by_channel(
+def plot_ripple_power_by_channel_old(
     lfp_path: Path, 
     mouse: str, 
     aligner: Rsync_aligner,
@@ -325,6 +326,184 @@ def plot_ripple_power_by_channel(
         ax2_ratio.set_xticklabels(xticks[xticks <= time_axis[-1]].astype(int), rotation=90, fontsize=8)
         plt.tight_layout()
         plt.savefig(f'power_plots/RSC_{aligner_id}_segment_{seg+1}.jpg', dpi=300, bbox_inches='tight')
+        plt.close()
+
+def plot_ripple_power_by_channel_old(
+    lfp_path: Path, 
+    mouse: str, 
+    aligner: Rsync_aligner,
+    session: Session,
+    ca1_range: tuple,
+    rsc_range: tuple, 
+    aligner_id: str = "default",
+    area_channel: list = None,
+    probe: str = None  # Added probe parameter
+) -> None:
+    task_name = "_".join(aligner_id.split("_")[1:-1])
+    print(f"CA1 range: {ca1_range}")
+    print(f"RSC range: {rsc_range}")
+
+    chunk_start_seconds = 0
+    chunk_end_seconds = session.run_end
+    
+    lfp_cache_path = Path(f"lfp_cache_{mouse}_{aligner_id}.npy")
+    if not lfp_cache_path.exists():
+        print(f"Loading fresh LFP data for session {aligner_id}")
+        lfp = load_lfp_reactivations(
+            lfp_path,
+            chunk_start_seconds=chunk_start_seconds,
+            chunk_end_seconds=chunk_end_seconds,
+        )
+        np.save(lfp_cache_path, lfp)
+    else:
+        print(f"Loading cached LFP data for session {aligner_id}")
+        lfp = np.load(lfp_cache_path)
+
+    # Common average referencing
+    lfp = lfp - np.mean(lfp, axis=1, keepdims=True)
+
+    THETA_BAND = [5, 9]
+    DELTA_BAND = [0.5, 4]
+    RIPPLE_BAND = [120, 250]
+
+    ca1_channels = range(ca1_range[0], ca1_range[1] + 1)  # +1 to make inclusive
+    rsc_channels = range(rsc_range[0], rsc_range[1] + 1)
+
+    # Add validation for channel ranges
+    def validate_channels(channels, name):
+        start, end = channels
+        if start < 0 or end >= lfp.shape[0]:
+            raise ValueError(f"{name} range {channels} exceeds LFP channels (0-{lfp.shape[0]-1})")
+        return range(start, end + 1)
+    
+    try:
+        ca1_channels = validate_channels(ca1_range, "CA1")
+        rsc_channels = validate_channels(rsc_range, "RSC")
+    except ValueError as e:
+        print(f"Channel range error: {e}")
+        return
+
+    print(f"\n=== DEBUG INFO ===")
+    print(f"LFP array shape: {lfp.shape} (channels × samples)")
+    print(f"CA1 channel range: {ca1_range}")
+    print(f"RSC channel range: {rsc_range}")
+    print(f"Chunk start time: {chunk_start_seconds}")
+    print(f"Chunk end time: {chunk_end_seconds}")
+    
+
+    # Process each region
+    def process_region(channels, region_name):
+        try:
+            print(f"\nProcessing {region_name} channels {channels}")
+            
+            channel_indices = list(range(channels.start, channels.stop))
+            region_lfp = lfp[channel_indices, :]
+            print(f"Raw data shape: {region_lfp.shape}")
+            
+            theta = bandpass_filter(region_lfp, 5, 9, 2500)
+            delta = bandpass_filter(region_lfp, 0.5, 4, 2500)
+            print(f"Filtered theta shape: {theta.shape}")
+            
+            theta_env = compute_envelope(theta)
+            delta_env = compute_envelope(delta)
+            
+            if theta_env.ndim == 2:
+                theta_env = np.mean(theta_env, axis=0)
+            if delta_env.ndim == 2:
+                delta_env = np.mean(delta_env, axis=0)
+            
+            print(f"Envelope shapes - theta: {theta_env.shape}, delta: {delta_env.shape}")
+            
+            window = 25000
+            pad_size = window // 2
+            smooth_theta = np.convolve(theta_env, np.ones(window)/window, 'same')
+            smooth_delta = np.convolve(delta_env, np.ones(window)/window, 'same')
+            
+            smooth_theta = smooth_theta[pad_size:-pad_size]
+            smooth_delta = smooth_delta[pad_size:-pad_size]
+            
+            smooth_theta = np.pad(smooth_theta, (pad_size, pad_size), mode='edge')
+            smooth_delta = np.pad(smooth_delta, (pad_size, pad_size), mode='edge')
+            
+            return smooth_theta, smooth_delta
+            
+        except Exception as e:
+            print(f"Error processing {region_name}: {str(e)}")
+            traceback.print_exc()
+            return np.zeros(1000), np.zeros(1000)
+        
+    # Process both regions
+    ca1_theta, ca1_delta = process_region(ca1_channels, "CA1")
+    rsc_theta, rsc_delta = process_region(rsc_channels, "RSC")
+
+    # Create time axis (in seconds)
+    time_axis = np.arange(lfp.shape[1]) / 2500
+
+    # Create output directory
+    os.makedirs('power_plots', exist_ok=True)
+
+    # Calculate segmentation
+    total_samples = len(time_axis)
+    segment_length = 2500 * 60 * 10  # 10 minutes in samples
+    n_segments = calculate_segments(len(time_axis))
+    print(f"Total duration: {len(time_axis)/2500:.1f}s → {n_segments} segments")
+
+    for seg in range(n_segments):
+        start_idx = seg * segment_length
+        end_idx = min((seg + 1) * segment_length, total_samples)
+        if seg == n_segments - 1:
+            end_idx = total_samples
+        
+        duration = (end_idx - start_idx)/2500
+        print(f"Segment {seg+1}: {start_idx/2500:.1f}s-{end_idx/2500:.1f}s ({duration:.1f}s)")
+
+        if start_idx >= end_idx: 
+            continue
+
+        seg_duration = (end_idx - start_idx)/2500
+        print(f"Processing segment {seg+1}: {start_idx/2500:.1f}s to {end_idx/2500:.1f}s ({seg_duration:.1f}s)")
+
+        if start_idx >= total_samples:
+            break
+
+        # Create 4-panel figure (2 regions × 2 frequency bands)
+        fig, axs = plt.subplots(2, 2, figsize=(20, 12))
+        fig.suptitle(f"Mouse {mouse} - Probe {probe} - {session.task_name} (Segment {seg+1})")
+        
+        # Plot settings
+        colors = {'theta': 'red', 'delta': 'blue'}
+        regions = {
+            'CA1': (ca1_theta, ca1_delta),
+            'RSC': (rsc_theta, rsc_delta)
+        }
+        
+        # Plot each region and frequency band
+        for i, (region_name, (theta, delta)) in enumerate(regions.items()):
+            # Theta plot
+            ax = axs[i, 0]
+            ax.plot(time_axis[start_idx:end_idx], theta[start_idx:end_idx], 
+                   color=colors['theta'], label='Theta (5-9 Hz)')
+            ax.set_title(f'{region_name} - Theta Power')
+            ax.set_ylabel('Power (μV)')
+            ax.grid(axis='x', alpha=0.2, linestyle='--')
+            
+            # Delta plot
+            ax = axs[i, 1]
+            ax.plot(time_axis[start_idx:end_idx], delta[start_idx:end_idx], 
+                   color=colors['delta'], label='Delta (0.5-4 Hz)')
+            ax.set_title(f'{region_name} - Delta Power')
+            ax.set_ylabel('Power (μV)')
+            ax.grid(axis='x', alpha=0.2, linestyle='--')
+            
+            # Add gridlines every 10 seconds
+            for j in range(2):
+                axs[i,j].xaxis.set_major_locator(plt.MultipleLocator(10))
+                axs[i,j].set_xlabel('Time (seconds)')
+                axs[i,j].legend()
+        
+        plt.tight_layout()
+        plt.savefig(f'power_plots/{mouse}_probe{probe}_{aligner_id}_segment_{seg+1}.jpg', 
+                   dpi=300, bbox_inches='tight')
         plt.close()
 
 
@@ -574,4 +753,172 @@ def plot_spectrogram(lfp: np.ndarray, sampling_rate_lfp: int) -> None:
     plt.yticks(range(len(edges)), edges)
     plt.show()
 
+def plot_ripple_power_by_channel(
+    lfp_data: Dict[str, np.ndarray],
+    mouse: str,
+    session: Session,
+    probe_params: Dict[str, Dict[str, Any]],
+    aligner_id: str = "default",
+    output_dir: Path = None,
+    combined_plot: bool = True
+) -> None:
+    """Final version with all formatting improvements requested by Suraya"""
     
+    def process_region(lfp, channels, region_name):
+        """Process LFP data for one region"""
+        try:
+            region_lfp = lfp[list(channels), :]
+            theta = bandpass_filter(region_lfp, 5, 9, 2500)
+            delta = bandpass_filter(region_lfp, 0.5, 4, 2500)
+            theta_env = compute_envelope(theta)
+            delta_env = compute_envelope(delta)
+            
+            if theta_env.ndim == 2:
+                theta_env = np.mean(theta_env, axis=0)
+            if delta_env.ndim == 2:
+                delta_env = np.mean(delta_env, axis=0)
+            
+            window = 25000
+            smooth_theta = np.convolve(theta_env, np.ones(window)/window, 'same')
+            smooth_delta = np.convolve(delta_env, np.ones(window)/window, 'same')
+            
+            pad = window//2
+            return (
+                np.pad(smooth_theta[pad:-pad], (pad, pad), 'edge'),
+                np.pad(smooth_delta[pad:-pad], (pad, pad), 'edge')
+            )
+        except Exception as e:
+            print(f"Error in {region_name}: {e}")
+            traceback.print_exc()
+            return np.zeros(lfp.shape[1]), np.zeros(lfp.shape[1])
+
+    def calculate_robust_limits(data, percentile=95):
+        """Y-axis scaling with 40% buffer"""
+        clean_data = data[np.isfinite(data)]
+        if len(clean_data) == 0:
+            return 0, 1
+        lower = np.percentile(clean_data, 100-percentile)
+        upper = np.percentile(clean_data, percentile)
+        buffer = 0.4 * (upper - lower)  # Increased from 30% to 40% to capture genuine spikes
+        return max(0, lower - buffer), upper + buffer
+
+    
+    
+    
+    # Process all probes
+    processed = {}
+    for probe, lfp in lfp_data.items():
+        lfp = lfp - np.mean(lfp, axis=1, keepdims=True)
+        ranges = probe_params[probe]
+        processed[probe] = {
+            'CA1': process_region(lfp, range(*ranges['ca1_range']), "CA1"),
+            'RSC': process_region(lfp, range(*ranges['rsc_range']), "RSC")
+        }
+
+    time_axis = np.arange(next(iter(lfp_data.values())).shape[1]) / 2500
+    
+    # Calculate segments
+    def calculate_segments(total_samples):
+        segment_length = 2500 * 60 * 10
+        n_full = total_samples // segment_length
+        remainder = total_samples % segment_length
+        return n_full + 1 if remainder > (2500 * 5) else max(1, n_full)
+    
+    n_segments = calculate_segments(len(time_axis))
+
+    for seg in range(n_segments):
+        segment_length = 2500 * 60 * 10
+        start_idx = seg * segment_length
+        end_idx = min((seg + 1) * segment_length, len(time_axis))
+        segment_duration = (end_idx - start_idx)/2500
+        plot_slice = slice(start_idx, end_idx)
+        
+        if start_idx >= end_idx:
+            continue
+
+        # Create figure
+        fig, axs = plt.subplots(4, 1, figsize=(16, 18))
+        fig.suptitle(f"{mouse} - {session.task_name} (Segment {seg+1}/{n_segments})", y=0.99)
+        
+        # Gridline settings - VERY VISIBLEtried to make sure that they're visible without dominating the plot
+        MAJOR_GRID = {
+            'color': '#000000',  # Pure black
+            'alpha': 1.0,       # Fully opaque
+            'linestyle': '-',   # Solid line
+            'linewidth': 1.2    # Thicker lines
+        }
+        LABEL_STYLE = {
+            'rotation': 90,
+            'verticalalignment': 'center',
+            'fontsize': 10
+        }
+
+        # Calculate ticks
+        all_10s_ticks = np.arange(
+            np.ceil(time_axis[start_idx]/10)*10,
+            time_axis[end_idx-1] + 10,
+            10
+        )
+        
+       
+        if segment_duration <= 20:
+            num_labels = min(5, int(segment_duration) + 1) 
+            label_ticks = np.linspace(
+                time_axis[start_idx],
+                time_axis[end_idx-1],
+                num_labels
+            )
+            label_ticks = np.unique(np.round(label_ticks))
+        else:
+            label_ticks = np.arange(
+                np.ceil(time_axis[start_idx]/20)*20,
+                time_axis[end_idx-1] + 20,
+                20
+            )
+        
+        # Ensure final point is labeled
+        if len(label_ticks) == 0 or label_ticks[-1] < time_axis[end_idx-1] - 1:
+            label_ticks = np.append(label_ticks, time_axis[end_idx-1])
+
+        # Plot each subplot
+        for i, (probe, region) in enumerate([('A', 'CA1'), ('A', 'RSC'), ('B', 'CA1'), ('B', 'RSC')]):
+            if probe not in processed:
+                continue
+                
+            ax = axs[i]
+            theta, delta = processed[probe][region]
+            
+            # Plot data
+            ax.plot(time_axis[plot_slice], theta[plot_slice], 'r-', label='Theta (5-9 Hz)')
+            ax.plot(time_axis[plot_slice], delta[plot_slice], 'b-', label='Delta (0.5-4 Hz)')
+            
+            # Formatting
+            ax.set_title(f"Probe {probe} - {region} Power", pad=10)
+            ax.set_ylabel('Power (μV)', labelpad=10)
+            ax.set_ylim(*calculate_robust_limits(np.concatenate([
+                theta[plot_slice], 
+                delta[plot_slice]
+            ])))
+            
+            # Set ticks and DARK gridlines
+            ax.set_xticks(all_10s_ticks)
+            ax.grid(which='major', **MAJOR_GRID)
+            
+            # Set labels at specified points
+            ax.set_xticklabels(
+                [f"{int(tick)}" if tick in label_ticks else "" for tick in all_10s_ticks],
+                **LABEL_STYLE
+            )
+            
+            if i == 0:
+                ax.legend(loc='upper right', framealpha=0.9)
+            
+            ax.set_xlim(time_axis[start_idx], time_axis[end_idx-1])
+            
+            if i == 3:
+                ax.set_xlabel('Time (seconds)', labelpad=10)
+        
+        plt.tight_layout(pad=2.0, h_pad=1.5)
+        output_path = output_dir / f"{mouse}_{aligner_id}_segment{seg+1}.png"
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()

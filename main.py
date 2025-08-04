@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -332,7 +333,7 @@ def main(data_folder: Path, lfp_path: Path,
          ap: float, ml: float, az: int,
          elevation: int, depth: int, n_channels: int,
          phase: int = 1) -> None:  # 1=SWR only, 2=Power plots only
-    
+    # Note that this function has now been replaced with process_mouse and process_mouse_p2 to allow the phases to be run independently
     mouse_id = data_folder.name
     
 
@@ -768,16 +769,16 @@ def process_mouse(
             pickle.dump((sessions, lfp_path, ap, ml, az, elevation, depth, n_channels), f)
         return []
 
-    # PHASE 2: Generate power plots using cached data
+    # PHASE 2: Generate power plots using cached data. Note that this has now been replaced by a standalone function process_mouse_p2
     elif phase == 2:
         with open(cache_file, 'rb') as f:
             sessions, lfp_path, ap, ml, az, elevation, depth, n_channels = pickle.load(f)
         
         sessions_list = []
-        aligners = []  # Your existing aligner creation code
+        aligners = [] 
         
         for i, session in enumerate(sessions):
-            aligner = Rsync_aligner(...)  # Your existing aligner code
+            aligner = Rsync_aligner(...) 
             aligners.append(aligner)
             
             # Generate power plots with manual ranges
@@ -896,3 +897,86 @@ if __name__ == "__main__":
     # data_folder = Path("/Volumes/MarcBusche/Alex/Reactivations/2025-05-20/11150")
     # lfp_path = data_folder / "20250520_g0" / "20250520_g0_imec0"
     # main(data_folder, lfp_path)
+
+def process_mouse_p2(
+    data_folder: Path,
+    mouse_id: str,
+    probe_params: Dict[str, Dict[str, Any]],
+    ap: float, ml: float, az: int,
+    elevation: int, depth: int, n_channels: int,
+    phase: int = 2,
+    **kwargs
+) -> List[Tuple]:
+    """Main Phase 2 processing function"""
+    # Load cached session data
+    cache_file = data_folder / f"{mouse_id}_session_data.pkl"
+    with open(cache_file, 'rb') as f:
+        sessions, _, _, _, _, _, _, _ = pickle.load(f)
+    
+    sessions_list = []
+    output_dir = data_folder / "power_plots"
+    output_dir.mkdir(exist_ok=True)
+    
+    for i, session in enumerate(sessions):
+        # Prepare LFP data for all probes
+        lfp_data = {}
+        for probe, params in probe_params.items():
+            lfp_cache_path = params['cache'] / f"lfp_cache_{mouse_id}_session{i}.npy"
+            if not lfp_cache_path.exists():
+                raise FileNotFoundError(f"LFP cache not found at {lfp_cache_path}")
+            lfp_data[probe] = np.load(lfp_cache_path)
+        
+        # Generate plots using the specialized function
+        plot_ripple_power_by_channel(
+            lfp_data=lfp_data,
+            mouse=mouse_id,
+            session=session,
+            probe_params=probe_params,
+            aligner_id=f"session{i}",
+            output_dir=output_dir,
+            combined_plot=True  # We always want combined plots here
+        )
+        
+        # Store session data for combined processing
+        for probe, params in probe_params.items():
+            sessions_list.append((
+                params['lfp_path'],
+                session,
+                params['ca1_range'],
+                params['rsc_range'],
+                f"{mouse_id}_{session.task_name}_{i}_probe{probe}"
+            ))
+    
+    return sessions_list
+
+import numpy as np
+from pprint import pprint
+
+def inspect_lfp_cache(filepath):
+    """Examine all available metadata in NPY file"""
+    with open(filepath, 'rb') as f:
+        # Try numpy's header reading
+        try:
+            version = np.lib.format.read_magic(f)
+            shape, fortran_order, dtype = np.lib.format.read_array_header_1_0(f)
+            print("\n=== NPY Header Info ===")
+            print(f"Shape: {shape}")
+            print(f"Data type: {dtype}")
+            print(f"Fortran order: {fortran_order}")
+        except Exception as e:
+            print(f"Couldn't read NPY header: {str(e)}")
+
+        # Check for custom metadata (common in neurophys formats)
+        try:
+            f.seek(0)
+            header = np.lib.format.read_array_header_1_0(f)[0]
+            if hasattr(header, '__dict__'):
+                print("\n=== Custom Metadata ===")
+                pprint(header.__dict__)
+        except:
+            pass
+
+    # Load first channel's first 10 samples
+    data = np.load(filepath)
+    print("\n=== Data Sample ===")
+    print(f"First 10 samples of channel 0:\n{data[0,:10]}")

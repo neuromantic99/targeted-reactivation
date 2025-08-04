@@ -1,7 +1,10 @@
 *.npy
 *.jpg
 *.png
-
+*.pkl
+*.json
+*.csv
+*.xlsx
 .DS_Store
 *.mp4
 
