@@ -4,7 +4,7 @@ from pathlib import Path
 
 here = Path(__file__).parent
 sys.path.append(str(here.parent))
-from analysis_spikes import split_data_by_trial
+from reactivation_classifier import split_data_by_trial
 
 
 def test_split_data_by_trial_basic() -> None:
