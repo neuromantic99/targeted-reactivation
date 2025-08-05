@@ -243,15 +243,18 @@ def process_mouse(
         assert np.array_equal(training_labels[0], training_labels[1])
         assert np.array_equal(testing_labels[0], testing_labels[1])
 
-    model, label_encoder, awake_score = get_awake_classifier(
+    model, label_encoder, awake_score, awake_shuffled_scores = get_awake_classifier(
         training_array.copy(),
         training_labels[0],
         C=C,
         penalty=penalty,
         solver=solver,
     )
+    np.save(
+        HERE / "results" / f"{subject}_awake_shuffled_scores.npy", awake_shuffled_scores
+    )
 
-    trial_states = get_sleep_state(data_path)
+    return
 
     assert len(trial_states) == testing_array.shape[0]
     trials_keep = np.isin(trial_states, ["nrem", "deep nrem"])
@@ -512,7 +515,15 @@ def get_awake_classifier(
     )
 
     model.fit(X, y_encoded)
-    return model, le, scores.mean()
+
+    shuffled_scores = []
+    for _ in range(100):
+        shuffle_idx = np.random.permutation(len(y_encoded))
+        y_shuffled = y_encoded[shuffle_idx]
+        scores = cross_val_score(model, X, y_shuffled, cv=cv, scoring="accuracy")
+        shuffled_scores.append(scores.mean())
+
+    return model, le, scores.mean(), shuffled_scores
 
 
 def get_training_data(
@@ -571,9 +582,6 @@ def plot_processed_data() -> float:
             continue
         score = np.load(results_path / f"{mouse}_classifier_score.npy").item()
         awake_scores.append(np.load(results_path / f"{mouse}_awake_scores.npy").item())
-        # shuffled_label_scores.extend(
-        #     np.load(results_path / f"{mouse}_classifier_shuffled_labels.npy")
-        # )
 
         if mouse[:3] == "000":
             shuffled_label_scores.extend(
@@ -595,16 +603,6 @@ def plot_processed_data() -> float:
         showfliers=False,
     )
 
-    # sns.stripplot(
-    #     data={
-    #         "WT": WT_scores,
-    #         "NLGF/S305N": NLGF_scores,
-    #         "shuffled_labels": shuffled_label_scores,
-    #     },
-    #     jitter=True,
-    #     color="black",
-    # )
-
     plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
     plt.legend()
     p1 = round(
@@ -623,6 +621,45 @@ def plot_processed_data() -> float:
     )
 
     return np.mean(awake_scores)
+
+
+def plot_processed_data_waking() -> float:
+    results_path = Path(__file__).parent / "results"
+    mice = set([file.stem.split("_")[0] for file in results_path.glob("*.npy")])
+    WT_scores = []
+    NLGF_scores = []
+    shuffled_label_scores = []
+
+    for mouse in mice:
+        if mouse in ["11153"]:
+            continue
+
+        score = np.load(results_path / f"{mouse}_awake_scores.npy").item()
+        shuffled_label_scores.extend(
+            np.load(results_path / f"{mouse}_awake_shuffled_scores.npy")
+        )
+        if mouse[:3] == "000":
+            WT_scores.append(score)
+        else:
+            NLGF_scores.append(score)
+
+    plt.figure()
+    sns.boxplot(
+        data={
+            "WT": WT_scores,
+            "NLGF/S305N": NLGF_scores,
+            "shuffled_labels": shuffled_label_scores,
+        },
+        showfliers=False,
+    )
+
+    plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
+    plt.legend()
+    p1 = round(
+        mannwhitneyu(WT_scores, NLGF_scores, alternative="two-sided").pvalue,
+        3,
+    )
+    plt.title(f"WT vs NLGF/S305N: {p1}")
 
 
 def main() -> None:
@@ -1164,6 +1201,7 @@ def compare_classification_methods_rigorous(
 
 
 if __name__ == "__main__":
-    plot_processed_data()
+    # plot_processed_data()
+    plot_processed_data_waking()
     plt.show()
     # main()
