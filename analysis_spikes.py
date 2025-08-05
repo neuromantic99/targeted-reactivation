@@ -13,7 +13,10 @@ from rsync import Rsync_aligner
 from utils import get_aligners, get_data_paths, process_session
 from sklearn.preprocessing import minmax_scale
 
+from scipy.stats import kruskal, mannwhitneyu
 
+
+from sklearn.metrics import balanced_accuracy_score
 from scipy.ndimage import gaussian_filter1d
 
 from ripples.utils_npyx import load_sync_npyx
@@ -256,48 +259,46 @@ def process_mouse(
     print(
         f"Keeping {np.sum(trials_keep)} trials out of {len(trial_states)} based on sleep state."
     )
+    if np.sum(trials_keep) < 20:
+        1 / 0
 
     testing_array = testing_array[trials_keep, :, :]
     testing_labels = testing_labels[0][trials_keep]
+    assert (
+        len(testing_labels) > 0
+    ), "Testing labels are empty after filtering by sleep state."
 
-    if len(testing_labels) == 0:
-        pass
-
-    score, shuffled_scores = fit_classifier_to_sleeping_data(
-        testing_array.copy(), testing_labels, model, label_encoder, offset=offset
-    )
+    # score, shuffled_scores = fit_classifier_to_sleeping_data(
+    #     testing_array.copy(), testing_labels, model, label_encoder, offset=offset
+    # )
 
     # Optional: Test improved methods (set to True to compare methods)
-    test_improved_methods = True
 
-    if test_improved_methods:
-        print(f"\n{'='*20} TESTING IMPROVED METHODS {'='*20}")
-        method_results = compare_classification_methods_rigorous(
-            training_array,
-            testing_array,
-            training_labels[0],
-            testing_labels,
-            model,
-            label_encoder,
-            C,
-            penalty,
-            solver,
-            offset=offset,
-            subject=subject,
-        )
+    method_results = compare_classification_methods_rigorous(
+        training_array,
+        testing_array,
+        training_labels[0],
+        testing_labels,
+        model,
+        label_encoder,
+        C,
+        penalty,
+        solver,
+        offset=offset,
+        subject=subject,
+    )
 
-        # Use the best result
-        best_method = max(method_results, key=method_results.get)
-        best_score = method_results[best_method]
+    # score = method_results["cross_domain"]
+    # score_shuffled_labels = method_results["cross_domain_shuffled_labels"]
 
-        print(
-            f"\nUsing {best_method.replace('_', ' ').title()} result: {best_score:.3f}"
-        )
-        # score = best_score  # Override with best method
-        score = method_results["cross_domain"]
+    score = method_results["principled_threshold"]
+    score_shuffled_labels = method_results["principled_threshold_shuffled_labels"]
 
     np.save(HERE / "results" / f"{subject}_classifier_score.npy", score)
-    np.save(HERE / "results" / f"{subject}_shuffled_scores.npy", shuffled_scores)
+    np.save(
+        HERE / "results" / f"{subject}_classifier_shuffled_labels.npy",
+        score_shuffled_labels,
+    )
     np.save(HERE / "results" / f"{subject}_awake_scores.npy", awake_score)
 
 
@@ -416,7 +417,7 @@ def fit_classifier_to_sleeping_data(
     print(f"Classifier score on sleeping data: {score:.2f}")
 
     shuffled_scores = []
-    for _ in range(1000):
+    for _ in range(100):
         shuffle_idx = np.random.permutation(len(y_encoded))
         X_shuffled = X[shuffle_idx, :]
         result_shuffled = awake_model.predict(X_shuffled)
@@ -469,10 +470,7 @@ def X_from_trial_array(trial_array: np.ndarray, offset: int = 0) -> np.ndarray:
     # Transform to (n_samples, n_features)
     normalize_trial_array(trial_array)
     n_bins = trial_array.shape[2]
-    print(trial_array.shape)
     start = (n_bins // 2) + offset
-    # start += 1
-
     end = start + 10
     X = trial_array[:, :, start:end]
     # return X.reshape(X.shape[0], -1)
@@ -566,35 +564,71 @@ def plot_processed_data() -> float:
     WT_scores = []
     NLGF_scores = []
     awake_scores = []
+    shuffled_label_scores = []
 
     for mouse in mice:
-        print("AHHHH PUT ME BACK")
-        if mouse in ["11153", "00058"]:
+        if mouse in ["11153"]:
             continue
         score = np.load(results_path / f"{mouse}_classifier_score.npy").item()
         awake_scores.append(np.load(results_path / f"{mouse}_awake_scores.npy").item())
+        # shuffled_label_scores.extend(
+        #     np.load(results_path / f"{mouse}_classifier_shuffled_labels.npy")
+        # )
 
         if mouse[:3] == "000":
+            shuffled_label_scores.extend(
+                np.load(results_path / f"{mouse}_classifier_shuffled_labels.npy")
+            )
             WT_scores.append(score)
+            print(f"Mouse {mouse} is WT")
         else:
             NLGF_scores.append(score)
+            print(f"Mouse {mouse} is NLGF/S305N")
 
     plt.figure()
-    sns.boxplot(data={"WT": WT_scores, "NLGF/S305N": NLGF_scores}, showfliers=False)
-    sns.stripplot(
-        data={"WT": WT_scores, "NLGF/S305N": NLGF_scores},
-        jitter=True,
-        color="black",
+    sns.boxplot(
+        data={
+            "WT": WT_scores,
+            "NLGF/S305N": NLGF_scores,
+            "shuffled_labels": shuffled_label_scores,
+        },
+        showfliers=False,
     )
+
+    # sns.stripplot(
+    #     data={
+    #         "WT": WT_scores,
+    #         "NLGF/S305N": NLGF_scores,
+    #         "shuffled_labels": shuffled_label_scores,
+    #     },
+    #     jitter=True,
+    #     color="black",
+    # )
 
     plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
     plt.legend()
+    p1 = round(
+        mannwhitneyu(WT_scores, shuffled_label_scores, alternative="two-sided").pvalue,
+        3,
+    )
+    p2 = round(
+        mannwhitneyu(
+            NLGF_scores, shuffled_label_scores, alternative="two-sided"
+        ).pvalue,
+        3,
+    )
+    p3 = round(mannwhitneyu(WT_scores, NLGF_scores, alternative="two-sided").pvalue, 3)
+    plt.title(
+        f"WT vs NLGF/S305N: {p3}, WT vs shuffled: {p1}, NLGF/S305N vs shuffled: {p2}"
+    )
+
     return np.mean(awake_scores)
 
 
 def main() -> None:
 
     umbrella = Path("/Volumes/MarcBusche/Alex/Reactivations")
+
     kilosort_paths = list(umbrella.rglob("*/kilosort4"))
     path_dict: Dict[str, List[Path]] = {}
     if len(kilosort_paths) == 0:
@@ -604,8 +638,7 @@ def main() -> None:
     for kilosort_path in kilosort_paths:
         mouse = kilosort_path.parts[-4]
         # This mouse has bad data, see email
-        print("AHHHH PUT ME BACK")
-        if mouse in ["11153", "00058"]:
+        if mouse in ["11153"]:
             continue
         if mouse not in path_dict:
             path_dict[mouse] = []
@@ -614,7 +647,7 @@ def main() -> None:
     solver = "liblinear"  # Solver for Logistic Regression
     penalty = "l1"
 
-    for C in [1, 10]:
+    for C in [5]:
 
         for mouse, kilosort_paths in path_dict.items():
 
@@ -627,10 +660,10 @@ def main() -> None:
             data_path = kilosort_paths[0].parent.parent.parent
             process_mouse(data_path, kilosort_paths, C, penalty, solver, offset=0)
 
-        awake_score = plot_processed_data()
-        plt.title(
-            f"C = {C}, penalty = {penalty}, solver = {solver}, awake = {awake_score: .2f} offset = {0}"
-        )
+        # awake_score = plot_processed_data()
+        # plt.title(
+        #     f"C = {}, penalty = {penalty}, solver = {solver}, awake = {awake_score: .2f} offset = {0}"
+        # )
 
     plt.show()
 
@@ -762,7 +795,7 @@ def apply_threshold_correction(
 
     # Calculate z-score with shuffled data
     shuffled_scores = []
-    for _ in range(1000):
+    for _ in range(100):
         shuffle_idx = np.random.permutation(len(y_encoded))
         X_shuffled = X[shuffle_idx, :]
         scores_shuffled = awake_model.decision_function(X_shuffled)
@@ -824,12 +857,20 @@ def apply_principled_threshold_correction(
 
     # Find optimal threshold on optimization set
     decision_scores_opt = awake_model.decision_function(X_opt)
-    thresholds = np.linspace(decision_scores_opt.min(), decision_scores_opt.max(), 100)
+
+    thresholds = np.linspace(
+        decision_scores_opt.min(),
+        decision_scores_opt.max(),
+        100,
+    )
     accuracies = []
 
     for threshold in thresholds:
         predictions = (decision_scores_opt > threshold).astype(int)
-        accuracy = np.mean(predictions == y_opt)
+        # Use balanced accuracy score instead of simple accuracy
+
+        accuracy = balanced_accuracy_score(y_opt, predictions)
+        # accuracy = np.mean(predictions == y_opt)
         accuracies.append(accuracy)
 
     optimal_threshold = thresholds[np.argmax(accuracies)]
@@ -840,26 +881,38 @@ def apply_principled_threshold_correction(
     decision_scores_eval = awake_model.decision_function(X_eval)
     corrected_predictions = (decision_scores_eval > optimal_threshold).astype(int)
 
-    score = np.mean(corrected_predictions == y_eval)
-    original_score = np.mean((decision_scores_eval > 0) == y_eval)
+    score = balanced_accuracy_score(y_eval, corrected_predictions)
+    # assert not np.all(
+    #     corrected_predictions == corrected_predictions[0]
+    # ), "All predictions are the same. This indicates a problem with the threshold or the data."
+
+    original_score = balanced_accuracy_score(
+        y_eval, (decision_scores_eval > 0).astype(int)
+    )
+    return score, None, None
+    print(f"Number of trials in eval set: {len(y_eval)}")
 
     print(f"Original accuracy on eval set: {original_score:.4f}")
     print(f"Corrected accuracy on eval set: {score:.4f}")
     print(f"Improvement: {score - original_score:.4f}")
 
-    # Calculate z-score with shuffled data (on evaluation set only)
-    shuffled_scores = []
-    for _ in range(1000):
-        shuffle_eval_idx = np.random.permutation(len(y_eval))
-        X_shuffled = X_eval[shuffle_eval_idx, :]
-        scores_shuffled = awake_model.decision_function(X_shuffled)
-        pred_shuffled = (scores_shuffled > optimal_threshold).astype(int)
-        shuffled_scores.append(np.mean(pred_shuffled == y_eval))
+    # # Calculate z-score with shuffled data (on evaluation set only)
+    # shuffled_scores = []
+    # for _ in range(1000):
+    #     shuffle_eval_idx = np.random.permutation(len(y_eval))
+    #     X_shuffled = X_eval[shuffle_eval_idx, :]
+    #     scores_shuffled = awake_model.decision_function(X_shuffled)
+    #     pred_shuffled = (scores_shuffled > optimal_threshold).astype(int)
+    #     shuffled_scores.append(np.mean(pred_shuffled == y_eval))
 
-    zscore = (score - np.mean(shuffled_scores)) / np.std(shuffled_scores)
+    # # assert not np.allclose(
+    # #     shuffled_scores, shuffled_scores[0], atol=1e-6
+    # # ), "Shuffled scores are all the same. This indicates a problem with the shuffling or the data."
+    # zscore = (score - np.mean(shuffled_scores)) / np.std(shuffled_scores)
+    # # assert not np.isnan(zscore), "Z-score is NaN. Likely only one label is predicted."
 
-    print(f"Principled threshold-corrected Z-score: {zscore:.3f}")
-    print("=" * 75)
+    # print(f"Principled threshold-corrected Z-score: {zscore:.3f}")
+    # print("=" * 75)
 
     return zscore, shuffled_scores, optimal_threshold
 
@@ -931,7 +984,13 @@ def apply_cross_domain_normalization(
 
     # Evaluate on normalized testing data
     predictions = model_norm.predict(X_test_norm)
-    score = np.mean(predictions == y_test_encoded)
+
+    assert not np.all(
+        predictions == predictions[0]
+    ), "All predictions are the same. This indicates a problem with the normalization or the data."
+
+    score = balanced_accuracy_score(y_test_encoded, predictions)
+    return score, None, None, None
 
     print(f"Cross-domain normalized accuracy: {score:.4f}")
 
@@ -942,7 +1001,7 @@ def apply_cross_domain_normalization(
         shuffle_idx = np.random.permutation(len(y_test_encoded))
         X_test_shuffled = X_test_norm[shuffle_idx, :]
         pred_shuffled = model_norm.predict(X_test_shuffled)
-        shuffled_scores.append(np.mean(pred_shuffled == y_test_encoded))
+        shuffled_scores.append(balanced_accuracy_score(y_test_encoded, pred_shuffled))
 
     zscore = (score - np.mean(shuffled_scores)) / np.std(shuffled_scores)
 
@@ -1028,67 +1087,83 @@ def compare_classification_methods_rigorous(
     offset: int = 0,
     subject: str = "Unknown",
 ) -> Dict[str, float]:
-    """Compare methods with proper validation to avoid data snooping."""
-
-    # print("\n" + "=" * 50)
-    # print("RIGOROUS CLASSIFICATION COMPARISON")
-    # print("=" * 50)
 
     results = {}
 
     # 1. Original method
-    print("\n1. ORIGINAL METHOD:")
-    original_zscore, _ = fit_classifier_to_sleeping_data(
-        testing_array.copy(), testing_labels, model, label_encoder, offset=offset
-    )
-    results["original"] = original_zscore
+    # print("\n1. ORIGINAL METHOD:")
+    # original_zscore, _ = fit_classifier_to_sleeping_data(
+    #     testing_array.copy(), testing_labels, model, label_encoder, offset=offset
+    # )
+    # results["original"] = original_zscore
 
     # 2. Scientific justification for threshold correction
-    justify_threshold_correction_scientifically(
-        training_array, testing_array, model, label_encoder
-    )
+    # justify_threshold_correction_scientifically(
+    #     training_array, testing_array, model, label_encoder
+    # )
 
     # 3. Principled threshold correction (with validation split)
-    print("\n2. PRINCIPLED THRESHOLD CORRECTION:")
+    # print("\n2. PRINCIPLED THRESHOLD CORRECTION:")
+
     principled_zscore, _, threshold = apply_principled_threshold_correction(
         testing_array.copy(), testing_labels, model, label_encoder, offset=offset
     )
+
     results["principled_threshold"] = principled_zscore
 
-    # 4. Cross-domain normalization
-    print("\n3. CROSS-DOMAIN NORMALIZATION:")
-    domain_zscore, _, _, _ = apply_cross_domain_normalization(
-        training_array.copy(),
-        testing_array.copy(),
-        training_labels,
-        testing_labels,
-        C,
-        penalty,
-        solver,
-        offset=offset,
-    )
-    results["cross_domain"] = domain_zscore
-
-    # Summary with interpretations
-    print("\n" + "=" * 30 + " RIGOROUS RESULTS " + "=" * 30)
-    print(f"Original method:              {results['original']:.3f}")
-    print(f"Principled threshold correction: {results['principled_threshold']:.3f}")
-    print(f"Cross-domain normalization:   {results['cross_domain']:.3f}")
-
-    print(f"\nINTERPRETATION:")
-    if results["principled_threshold"] > 0 and results["cross_domain"] > 0:
-        print(
-            f"🟢 CONSISTENT POSITIVE RESULTS across correction methods for subject {subject}"
+    shuffled_result = []
+    for _ in range(100):
+        np.random.shuffle(testing_labels)
+        principled_zscore, _, threshold = apply_principled_threshold_correction(
+            testing_array.copy(), testing_labels, model, label_encoder, offset=offset
         )
-        print("   → Strong evidence for reactivation during sleep")
-    elif results["original"] < 0 < results["principled_threshold"]:
-        print(f"🟡 CORRECTION REVEALS HIDDEN SIGNAL for subject {subject}")
-        print("   → Reactivation present but masked by state differences")
-    else:
-        print(f"🔴 NO CLEAR EVIDENCE for reactivation for subject {subject}")
+        shuffled_result.append(principled_zscore)
+
+    results["principled_threshold_shuffled_labels"] = shuffled_result
+
+    # 4. Cross-domain normalization
+
+    ################
+    # print("\n3. CROSS-DOMAIN NORMALIZATION:")
+    # cross_norm_score, _, _, _ = apply_cross_domain_normalization(
+    #     training_array.copy(),
+    #     testing_array.copy(),
+    #     training_labels,
+    #     testing_labels,
+    #     C,
+    #     penalty,
+    #     solver,
+    #     offset=offset,
+    # )
+
+    # shuffled_result = []
+
+    # for _ in range(100):
+    #     np.random.shuffle(testing_labels)
+    #     domain_zscore_shuffled_labels, _, _, _ = apply_cross_domain_normalization(
+    #         training_array.copy(),
+    #         testing_array.copy(),
+    #         training_labels,
+    #         testing_labels,
+    #         C,
+    #         penalty,
+    #         solver,
+    #         offset=offset,
+    #     )
+    #     shuffled_result.append(domain_zscore_shuffled_labels)
+
+    # ##########################################3
+
+    # results["principled_threshold"] = principled_zscore
+    # results["principled_threshold_shuffled_labels"] = principled_zscore_shuffled_labels
+
+    # results["cross_domain"] = cross_norm_score
+    # results["cross_domain_shuffled_labels"] = shuffled_result
 
     return results
 
 
 if __name__ == "__main__":
-    main()
+    plot_processed_data()
+    plt.show()
+    # main()
