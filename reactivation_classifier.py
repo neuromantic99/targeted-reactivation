@@ -4,8 +4,10 @@ from typing import Dict, List, Tuple
 from matplotlib import pyplot as plt
 import numpy as np
 from scipy.stats import ttest_ind
+from scipy.spatial import cKDTree
 import pandas as pd
 import seaborn as sns
+from sklearn import tree
 from sklearn.ensemble import RandomForestClassifier
 from data_import import Session
 from scipy.stats import zscore
@@ -52,16 +54,15 @@ def load_spiking_data(
     id_to_label = dict(zip(cluster_id, label))
     label_array = np.array([id_to_label[cluster] for cluster in spike_clusters])
 
-    channel_depth = np.load(kilosort_path / "channel_positions.npy")[:, 1]
-    spike_depth = np.load(kilosort_path / "spike_positions.npy")[:, 1]
+    channel_positions = np.load(kilosort_path / "channel_positions.npy")
+    spike_positions = np.load(kilosort_path / "spike_positions.npy")
     # Find the closest channel depth for each spike in a memory-efficient way
 
     if (kilosort_path / "closest_channel.npy").exists():
         closest_channel = np.load(kilosort_path / "closest_channel.npy")
     else:
-        closest_channel = np.array(
-            [np.argmin(np.abs(channel_depth - sd)) for sd in spike_depth]
-        )
+        tree = cKDTree(channel_positions)
+        _, closest_channel = tree.query(spike_positions, k=1)
         np.save(kilosort_path / "closest_channel.npy", closest_channel)
 
     return spike_times, spike_clusters, label_array, closest_channel
@@ -156,7 +157,17 @@ def split_data_by_trial_old(
     return result[:, actual_clusters, :]
 
 
-def get_ca1_rsc_mapping(kilosort_path: Path) -> Tuple[int, int, int, int]:
+def get_ca1_rsc_mapping(
+    kilosort_path: Path | None = None, lfp_path: Path | None = None
+) -> Tuple[int, int, int, int]:
+    """Deprecated, use the gsheet"""
+
+    match = lambda p: (
+        p.parts[-1] == kilosort_path.parts[-2]
+        and p.parts[-2] == kilosort_path.parts[-3]
+        if kilosort_path is not None
+        else p.parts[-1] == lfp_path.parts[-1]
+    )
 
     mapping_df = pd.read_csv(
         "/Users/jamesrowland/Desktop/mouse_lfp_mapping_full_population.csv"
@@ -164,10 +175,10 @@ def get_ca1_rsc_mapping(kilosort_path: Path) -> Tuple[int, int, int, int]:
     found = False
     for _, row in mapping_df.iterrows():
         p = PureWindowsPath(row["lfp_path"])
-        if (
-            p.parts[-1] == kilosort_path.parts[-2]
-            and p.parts[-2] == kilosort_path.parts[-3]
-        ):
+        if match(p):
+            print(
+                f"Found mapping for kilosort path {kilosort_path} or lfp path {lfp_path} with {p}"
+            )
             assert not found, "Found multiple mappings for the same kilosort path."
             ca1_low = row["CA1_Low"]
             ca1_high = row["CA1_High"]
@@ -176,7 +187,7 @@ def get_ca1_rsc_mapping(kilosort_path: Path) -> Tuple[int, int, int, int]:
             found = True
 
     if found:
-        return ca1_low, ca1_high, rsc_low, rsc_high
+        return int(ca1_low), int(ca1_high), int(rsc_low), int(rsc_high)
 
     raise ValueError(f"Could not find mapping for kilosort path {kilosort_path}. ")
 
@@ -1204,4 +1215,4 @@ if __name__ == "__main__":
     # plot_processed_data()
     plot_processed_data_waking()
     plt.show()
-    # main()
+    main()

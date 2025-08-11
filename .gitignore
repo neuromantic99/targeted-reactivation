@@ -1,5 +1,8 @@
+*.png
 *.npy
 *.json
+token.pickle
+credentials.json
 
 .DS_Store
 *.mp4
