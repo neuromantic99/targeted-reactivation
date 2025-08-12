@@ -125,6 +125,13 @@ def detect_ripples(
         sampling_rate_lfp=sampling_rate_lfp,
     )
 
+    if mouse == "00053":
+        ripples = [
+            ripple
+            for ripple in ripples
+            if ripple.peak_idx < 30 * 60 * sampling_rate_lfp
+        ]
+
     ripple_state = []
 
     for ripple in ripples:

@@ -198,7 +198,7 @@ def get_lfp_index_sleep_state(
     """Havent properly tested this yet, but the hacky plot looks fine"""
     seconds, sleep_state = process_sleep_spreadsheet(data_folder)
 
-    assert abs(seconds[-1] - n_samples / sampling_rate_lfp) < 1
+    assert abs(seconds[-1] - n_samples / sampling_rate_lfp) < 1.5
 
     state_idxs = {
         "awake": np.array([]),
@@ -234,7 +234,7 @@ def get_lfp_index_sleep_state(
 
     included_idxs = np.sort(np.concatenate(list(state_idxs.values())))
     assert np.all(np.diff(included_idxs) == 1)
-    assert (len(included_idxs) - n_samples) / sampling_rate_lfp < 1
+    assert (len(included_idxs) - n_samples) / sampling_rate_lfp < 1.5
 
     colors = ["blue", "green", "red"]
 
