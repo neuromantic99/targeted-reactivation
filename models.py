@@ -25,3 +25,18 @@ class RipplesCache(BaseModel):
     length_recording: float
     state: List[str]
     state_lengths: dict[str, float]
+
+
+class CandidateSpindle(BaseModel):
+    onset: int
+    offset: int
+    peak_amplitude: float
+    peak_idx: int
+    frequency: float
+
+
+class SpindleCache(BaseModel):
+    spindles: List[CandidateSpindle]
+    length_recording: float
+    state: List[str]
+    state_lengths: dict[str, float]

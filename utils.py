@@ -1,8 +1,10 @@
 from pathlib import Path
 from typing import List, Tuple
 import ffmpeg
+from matplotlib import pyplot as plt
 import numpy as np
 import cv2
+import pandas as pd
 
 from data_import import Session
 from models import LED, Sound
@@ -141,3 +143,127 @@ def process_session(session: Session) -> Tuple[List[Sound], List[LED] | None]:
         assert 0.99 < sound.time - led.time < 1.01
 
     return sounds, leds
+
+
+def process_sleep_spreadsheet(data_path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    num_to_state = {0.5: "nrem", 0: "deep nrem", 1: "rem", 2: "awake", 4: "movement"}
+
+    mouse = data_path.parts[-1]
+
+    spreadsheet_path = Path(
+        "/Volumes/MarcBusche/Alex/Reactivations/Sleep Scoring/results"
+    )
+
+    spreadsheets = list(spreadsheet_path.glob(f"*.xlsx"))
+    mouse_sheets = [
+        file_name
+        for file_name in spreadsheets
+        if mouse in str(file_name).lower()
+        and "tones" not in str(file_name).lower()
+        and file_name.name[:2] != "~$"  # Exclude temporary files
+    ]
+    assert (
+        len(mouse_sheets) == 1
+    ), f"Expected one sleep scoring spreadsheet for mouse {mouse}, found {len(mouse_sheets)}."
+    spreadsheet = mouse_sheets[0]
+
+    data = pd.read_excel(spreadsheet, sheet_name="Sheet1")
+
+    mins = data["Minutes"].to_numpy()
+    seconds = data["Seconds"].to_numpy()
+    score = data["Score"].to_numpy()
+
+    # Data missing at the end of the spreadsheet, had a look at the video. Mouse is moving a lot so assigned to awake
+    if "10681" in str(data_path):
+        first_nan = np.where(np.isnan(score))[0][0]
+        assert first_nan > 29 * 60
+        assert np.all(np.isnan(score[first_nan:]))
+        score[first_nan:] = 2  # awake
+
+    total_seconds = mins * 60 + seconds
+
+    # Mistake in all spreadsheets where the minute is set to 5 when it should be 6
+    total_seconds[368] = 368
+    assert np.all(np.diff(total_seconds) == 1)
+
+    return total_seconds, np.array([num_to_state[state] for state in score])
+
+
+def get_lfp_index_sleep_state(
+    data_folder: Path,
+    n_samples: int,
+    sampling_rate_lfp: float,
+    plot: bool = False,
+) -> dict[str, np.ndarray]:
+    """Havent properly tested this yet, but the hacky plot looks fine"""
+    seconds, sleep_state = process_sleep_spreadsheet(data_folder)
+
+    assert abs(seconds[-1] - n_samples / sampling_rate_lfp) < 1
+
+    state_idxs = {
+        "awake": np.array([]),
+        "nrem": np.array([]),
+        "rem": np.array([]),
+        "transition": np.array([]),
+    }
+
+    def map_state(state: str, next_state: str | None) -> str:
+        if state == "nrem" and next_state == "deep nrem":
+            return "nrem"
+        if state == "deep nrem" and next_state == "nrem":
+            return "nrem"
+        if state != next_state:
+            return "transition"
+        if state in {"movement", "awake"}:
+            return "awake"
+        if state in {"deep nrem", "nrem"}:
+            return "nrem"
+        if state == "rem":
+            return "rem"
+        raise ValueError(f"state {state} not recognized")
+
+    for idx, state in enumerate(sleep_state):
+        key = map_state(
+            state, sleep_state[idx + 1] if idx + 1 < len(sleep_state) else None
+        )
+
+        state_idxs[key] = np.append(
+            state_idxs[key],
+            np.arange(idx * sampling_rate_lfp, (idx + 1) * sampling_rate_lfp),
+        )
+
+    included_idxs = np.sort(np.concatenate(list(state_idxs.values())))
+    assert np.all(np.diff(included_idxs) == 1)
+    assert (len(included_idxs) - n_samples) / sampling_rate_lfp < 1
+
+    colors = ["blue", "green", "red"]
+
+    if plot:
+        plt.figure(figsize=(20, 4))
+
+        for idx, state in enumerate(["rem", "awake", "nrem"]):
+            plt.plot(
+                state_idxs[state] / sampling_rate_lfp,
+                np.ones_like(state_idxs[state]),
+                ".",
+                color=colors[idx],
+            )
+            plt.plot(
+                seconds[sleep_state == state],
+                np.ones_like(seconds[sleep_state == state]) + 1,
+                ".",
+                color=colors[idx],
+                label=f"{state}",
+            )
+
+        plt.plot(
+            state_idxs["transition"] / sampling_rate_lfp,
+            np.ones_like(state_idxs["transition"]),
+            ".",
+            color="black",
+        )
+
+        plt.ylim(0, 4)
+        plt.legend()
+
+    return state_idxs
