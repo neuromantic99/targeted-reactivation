@@ -72,7 +72,7 @@ def detect_spindles(
     #  if multiple events had the same start and end times, the version with the highest amplitude peak was kept, and the duplicates discarded.
     spindles = length_check(candidate_spindles, sampling_rate_lfp)
 
-    print(f"Number of candidate spindles after length check: {len(candidate_spindles)}")
+    print(f"Number of candidate spindles after length check: {len(spindles)}")
 
     lfp_state_idx = get_lfp_index_sleep_state(
         data_folder=data_folder,
@@ -81,6 +81,9 @@ def detect_spindles(
         n_samples=lfp.shape[1] if mouse != "00053" else 30 * 60 * sampling_rate_lfp,
         sampling_rate_lfp=sampling_rate_lfp,
     )
+
+    if mouse == "00053":
+        spindles = [s for s in spindles if s.peak_idx < 30 * 60 * sampling_rate_lfp]
 
     spindle_state = []
 
@@ -114,7 +117,6 @@ def length_check(
     filtered_spindles = []
     for spindle in candidate_spindles:
         duration = (spindle.offset - spindle.onset) / sampling_rate
-        print(duration)
         if 0.5 <= duration <= 2.5:
             filtered_spindles.append(spindle)
 

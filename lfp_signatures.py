@@ -14,9 +14,10 @@ from npyx import extract_rawChunk, read_metadata
 
 from ripples.utils_npyx import load_sync_npyx
 from consts import LOCAL_SSD
+from detect_ripples import detect_ripples
 from detect_spindles import detect_spindles
 from gsheets_importer import gsheet2df
-from models import RipplesCache
+from models import RipplesCache, SpindleCache
 
 from data_import import Session
 from main import HERE, get_aligners
@@ -34,8 +35,8 @@ def get_lfp_signatures(
     mouse = lfp_path.parent.parent.name
     imec = f"imec_{str(lfp_path).split('imec')[1]}"
 
-    # if (HERE / "results" / "ripples" / f"{mouse}_{imec}.json").exists():
-    #     print(f"Ripple results for {mouse}_{imec} already exist, skipping.")
+    # if (HERE / "results" / "spindles" / f"{mouse}_{imec}.json").exists():
+    #     print(f"Spindle results for {mouse}_{imec} already exist, skipping.")
     #     return
 
     ca1_low, ca1_high, rsc_low, rsc_high = region_channels
@@ -107,7 +108,7 @@ def get_lfp_signatures(
     #     imec=imec,
     # )
 
-    # detect_ripples(mouse, imec, ca1_low, ca1_high, data_folder, sampling_rate_lfp, lfp)
+    detect_ripples(mouse, imec, ca1_low, ca1_high, data_folder, sampling_rate_lfp, lfp)
     detect_spindles(mouse, imec, rsc_low, rsc_high, data_folder, sampling_rate_lfp, lfp)
 
 
@@ -178,34 +179,117 @@ def main() -> None:
 
 def plot_ripple_results():
     results_files = list((HERE / "results" / "ripples").glob("*.json"))
-    results: Dict[str, List] = {}
+    results = {}
     for result_file in results_files:
         mouse = result_file.name.split("_")[0]
+        if mouse not in results:
+            results[mouse] = {}
+
         ripple_cache = RipplesCache.model_validate_json(result_file.read_text())
         passing_checks = (
             np.array(ripple_cache.common_average_reference_check)
             & np.array(ripple_cache.frequency_check)
             & np.array(ripple_cache.super_ripple_check)
         )
-        n_seconds = ripple_cache.length_recording
-        rate = np.sum(passing_checks) / n_seconds
-        if mouse in results:
-            results[mouse].append(rate)
-        else:
-            results[mouse] = [rate]
+        if mouse == "00053":
+            passing_checks = passing_checks[: len(ripple_cache.candidate_events)]
 
-    to_plot = {"WT": [], "NLGF/S305N": []}
+        ripples = np.array(ripple_cache.candidate_events)[passing_checks]
+        ripple_states = np.array(ripple_cache.state)[passing_checks]
+
+        for state in np.unique(ripple_states):
+            state_ripples = ripples[ripple_states == state]
+            state_length = ripple_cache.state_lengths[state] / 2500
+            results[mouse][state] = results[mouse].get(state, []) + [
+                len(state_ripples) / state_length
+            ]
+
+    to_plot = {
+        "WT": {"nrem": [], "rem": [], "awake": []},
+        "NLGF/S305N": {"nrem": [], "rem": [], "awake": []},
+    }
+    # 00053 has one bad probe
     for mouse, rates in results.items():
         if mouse[:3] == "000":
             print(f"mouse {mouse} is WT")
-            to_plot["WT"].append(np.mean(rates))
+            for state in ["nrem", "rem", "awake"]:
+                if state in rates:
+                    to_plot["WT"][state].append(np.mean(rates[state]))
         else:
             print(f"mouse {mouse} is NLGF/S305N")
-            to_plot["NLGF/S305N"].append(np.mean(rates))
+            for state in ["nrem", "rem", "awake"]:
+                if state in rates:
+                    to_plot["NLGF/S305N"][state].append(np.mean(rates[state]))
 
-    sns.boxplot(to_plot)
-    plt.show()
+    records = []
+    for condition, states in to_plot.items():
+        for state, values in states.items():
+            for v in values:
+                records.append(
+                    {"Genotype": condition, "Sleep State": state, "Ripple rate (Hz)": v}
+                )
+
+    plt.figure()
+    df = pd.DataFrame(records)
+    sns.boxplot(data=df, x="Sleep State", y="Ripple rate (Hz)", hue="Genotype")
+
+
+def plot_spindle_results():
+    results_files = list((HERE / "results" / "spindles").glob("*.json"))
+    results = {}
+    for result_file in results_files:
+        mouse = result_file.name.split("_")[0]
+        if mouse not in results:
+            results[mouse] = {}
+
+        spindle_cache = SpindleCache.model_validate_json(result_file.read_text())
+
+        spindles = np.array(spindle_cache.spindles)
+        spindle_states = np.array(spindle_cache.state)
+
+        for state in np.unique(spindle_states):
+            state_ripples = spindles[spindle_states == state]
+            state_length = spindle_cache.state_lengths[state] / 2500
+            results[mouse][state] = results[mouse].get(state, []) + [
+                len(state_ripples) / state_length
+            ]
+
+    to_plot = {
+        "WT": {"nrem": [], "rem": [], "awake": []},
+        "NLGF/S305N": {"nrem": [], "rem": [], "awake": []},
+    }
+    # 00053 has one bad probe
+    for mouse, rates in results.items():
+        if mouse[:3] == "000":
+            print(f"mouse {mouse} is WT")
+            for state in ["nrem", "rem", "awake"]:
+                if state in rates:
+                    to_plot["WT"][state].append(np.mean(rates[state]))
+        else:
+            print(f"mouse {mouse} is NLGF/S305N")
+            for state in ["nrem", "rem", "awake"]:
+                if state in rates:
+                    to_plot["NLGF/S305N"][state].append(np.mean(rates[state]))
+
+    records = []
+    for condition, states in to_plot.items():
+        for state, values in states.items():
+            for v in values:
+                records.append(
+                    {
+                        "Genotype": condition,
+                        "Sleep State": state,
+                        "Spindle rate (min$^{-1}$)": v * 60,
+                    }
+                )
+
+    plt.figure()
+    df = pd.DataFrame(records)
+    sns.boxplot(data=df, x="Sleep State", y="Spindle rate (min$^{-1}$)", hue="Genotype")
 
 
 if __name__ == "__main__":
-    main()
+    plot_ripple_results()
+    plot_spindle_results()
+
+    plt.show()
