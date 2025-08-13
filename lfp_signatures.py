@@ -179,11 +179,10 @@ def main() -> None:
 
 def plot_ripple_results():
     results_files = list((HERE / "results" / "ripples").glob("*.json"))
-    results = {}
+    data = {"Genotype": [], "mouse_id": [], "Sleep State": [], "Ripple rate (Hz)": []}
+
     for result_file in results_files:
         mouse = result_file.name.split("_")[0]
-        if mouse not in results:
-            results[mouse] = {}
 
         ripple_cache = RipplesCache.model_validate_json(result_file.read_text())
         passing_checks = (
@@ -198,93 +197,52 @@ def plot_ripple_results():
         ripple_states = np.array(ripple_cache.state)[passing_checks]
 
         for state in np.unique(ripple_states):
+            if state == "transition":
+                continue
             state_ripples = ripples[ripple_states == state]
             state_length = ripple_cache.state_lengths[state] / 2500
-            results[mouse][state] = results[mouse].get(state, []) + [
-                len(state_ripples) / state_length
-            ]
+            data["Genotype"].append("WT" if mouse[:3] == "000" else "NLGF/S305N")
+            data["mouse_id"].append(mouse)
+            data["Sleep State"].append(state)
+            data["Ripple rate (Hz)"].append(len(state_ripples) / state_length)
 
-    to_plot = {
-        "WT": {"nrem": [], "rem": [], "awake": []},
-        "NLGF/S305N": {"nrem": [], "rem": [], "awake": []},
-    }
-    # 00053 has one bad probe
-    for mouse, rates in results.items():
-        if mouse[:3] == "000":
-            print(f"mouse {mouse} is WT")
-            for state in ["nrem", "rem", "awake"]:
-                if state in rates:
-                    to_plot["WT"][state].append(np.mean(rates[state]))
-        else:
-            print(f"mouse {mouse} is NLGF/S305N")
-            for state in ["nrem", "rem", "awake"]:
-                if state in rates:
-                    to_plot["NLGF/S305N"][state].append(np.mean(rates[state]))
-
-    records = []
-    for condition, states in to_plot.items():
-        for state, values in states.items():
-            for v in values:
-                records.append(
-                    {"Genotype": condition, "Sleep State": state, "Ripple rate (Hz)": v}
-                )
-
+    df = pd.DataFrame(data)
+    # Mean the ripple rate within a mouse and state
+    df = df.groupby(["Genotype", "mouse_id", "Sleep State"]).mean().reset_index()
     plt.figure()
-    df = pd.DataFrame(records)
     sns.boxplot(data=df, x="Sleep State", y="Ripple rate (Hz)", hue="Genotype")
 
 
 def plot_spindle_results():
     results_files = list((HERE / "results" / "spindles").glob("*.json"))
-    results = {}
+    data = {
+        "Genotype": [],
+        "mouse_id": [],
+        "Spindle rate (min$^{-1}$)": [],
+        "Sleep State": [],
+    }
     for result_file in results_files:
         mouse = result_file.name.split("_")[0]
-        if mouse not in results:
-            results[mouse] = {}
-
         spindle_cache = SpindleCache.model_validate_json(result_file.read_text())
-
         spindles = np.array(spindle_cache.spindles)
         spindle_states = np.array(spindle_cache.state)
 
         for state in np.unique(spindle_states):
-            state_ripples = spindles[spindle_states == state]
+            if state == "transition":
+                continue
+            state_spindles = spindles[spindle_states == state]
             state_length = spindle_cache.state_lengths[state] / 2500
-            results[mouse][state] = results[mouse].get(state, []) + [
-                len(state_ripples) / state_length
-            ]
+            data["Genotype"].append("WT" if mouse[:3] == "000" else "NLGF/S305N")
+            data["mouse_id"].append(mouse)
+            data["Sleep State"].append(state)
+            data["Spindle rate (min$^{-1}$)"].append(
+                (len(state_spindles) / state_length) * 60
+            )
 
-    to_plot = {
-        "WT": {"nrem": [], "rem": [], "awake": []},
-        "NLGF/S305N": {"nrem": [], "rem": [], "awake": []},
-    }
-    # 00053 has one bad probe
-    for mouse, rates in results.items():
-        if mouse[:3] == "000":
-            print(f"mouse {mouse} is WT")
-            for state in ["nrem", "rem", "awake"]:
-                if state in rates:
-                    to_plot["WT"][state].append(np.mean(rates[state]))
-        else:
-            print(f"mouse {mouse} is NLGF/S305N")
-            for state in ["nrem", "rem", "awake"]:
-                if state in rates:
-                    to_plot["NLGF/S305N"][state].append(np.mean(rates[state]))
-
-    records = []
-    for condition, states in to_plot.items():
-        for state, values in states.items():
-            for v in values:
-                records.append(
-                    {
-                        "Genotype": condition,
-                        "Sleep State": state,
-                        "Spindle rate (min$^{-1}$)": v * 60,
-                    }
-                )
-
+    df = pd.DataFrame(data)
+    # Average across probes within a mouse
+    df = df.groupby(["Genotype", "mouse_id", "Sleep State"]).mean().reset_index()
     plt.figure()
-    df = pd.DataFrame(records)
     sns.boxplot(data=df, x="Sleep State", y="Spindle rate (min$^{-1}$)", hue="Genotype")
 
 
