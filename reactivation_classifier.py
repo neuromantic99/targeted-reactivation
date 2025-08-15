@@ -581,7 +581,9 @@ def get_training_data(
 
 
 def plot_processed_data() -> float:
-    results_path = Path(__file__).parent / "results"
+    # results_path = Path(__file__).parent / "results" / "alex_results_working"
+    results_path = Path("/Volumes/MarcBusche/James/Alex/alex_results_working")
+
     mice = set([file.stem.split("_")[0] for file in results_path.glob("*.npy")])
     WT_scores = []
     NLGF_scores = []
@@ -635,7 +637,8 @@ def plot_processed_data() -> float:
 
 
 def plot_processed_data_waking() -> float:
-    results_path = Path(__file__).parent / "results"
+    # results_path = Path(__file__).parent / "results" / "alex_results_working"
+    results_path = Path("/Volumes/MarcBusche/James/Alex/alex_results_working")
     mice = set([file.stem.split("_")[0] for file in results_path.glob("*.npy")])
     WT_scores = []
     NLGF_scores = []
@@ -1212,7 +1215,7 @@ def compare_classification_methods_rigorous(
 
 
 if __name__ == "__main__":
-    # plot_processed_data()
-    plot_processed_data_waking()
+    plot_processed_data()
+    # plot_processed_data_waking()
     plt.show()
-    main()
+    # main()
