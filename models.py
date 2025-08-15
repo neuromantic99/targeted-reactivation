@@ -40,3 +40,12 @@ class SpindleCache(BaseModel):
     length_recording: float
     state: List[str]
     state_lengths: dict[str, float]
+
+
+class SlowOscillationCache(BaseModel):
+    starts: List[int]
+    ends: List[int]
+    state: List[str]
+    state_lengths: dict[str, float]
+    downsampled_lfp: List[float]
+    downsample_factor: int

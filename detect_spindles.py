@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 from matplotlib import pyplot as plt
 import numpy as np
 from ripples.utils import (
@@ -26,7 +26,8 @@ def detect_spindles(
     data_folder: Path,
     sampling_rate_lfp: float,
     lfp: np.ndarray,
-) -> None:
+) -> Tuple[np.ndarray, int]:
+    """Compute spindles and return common average reference RSC data and max sigma power channel index."""
     # The mean across all channels was subtracted (common average reference) and the
     # mean across all times was subtracted from each channel to normalise
     lfp = lfp[rsc_low:rsc_high, :]
@@ -109,6 +110,8 @@ def detect_spindles(
         "w",
     ) as f:
         json.dump(cache_result.model_dump(), f)
+
+    return lfp, max_power_channel
 
 
 def length_check(
