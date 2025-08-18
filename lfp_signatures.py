@@ -1,9 +1,10 @@
 from dataclasses import dataclass
-import json
+
 from pathlib import Path, PureWindowsPath
-from typing import Dict, List, Tuple
+from typing import Tuple
 import numpy as np
 import pandas as pd
+from ripples.models import CandidateEvent
 from ripples.utils import (
     threshold_detect,
 )
@@ -28,10 +29,17 @@ from main import HERE, get_aligners
 import matplotlib.pyplot as plt
 
 from utils import get_data_paths
+from collections import namedtuple
+from utils import save_figure
 
 HERE = Path(__file__).parent
 
 FIGURE_PATH = HERE / "plots" / "lfp_signatures"
+
+WT_COLOR = "#1f77b4"
+NLGF_COLOR = "#ff7f0e"
+
+SHUFFLED_COLOR = sns.color_palette("tab10")[2]
 
 
 def get_lfp_signatures(
@@ -166,7 +174,6 @@ def main() -> None:
     assert len(lfp_files) > 0, "No LFP files found"
 
     for lfp_file in lfp_files:
-
         if "11153" in str(lfp_file):
             print(f"Skipping {lfp_file.name} due to data issues")
             continue
@@ -236,18 +243,82 @@ def plot_ripple_results():
     # Mean the ripple rate within a mouse and state
     df = df.groupby(["Genotype", "mouse_id", "Sleep State"]).mean().reset_index()
 
+    summary_df = df.groupby(["Genotype", "Sleep State"]).agg(
+        {
+            "Ripple rate (Hz)": ["mean", "median", "std"],
+            "Ripple duration (ms)": ["mean", "median", "std"],
+            "Ripple amplitude (µV)": ["mean", "median", "std"],
+        }
+    )
+    summary_df.columns = ["_".join(col).strip() for col in summary_df.columns.values]
+    summary_df = summary_df.reset_index()
+
+    # Store p values in a dataframe
+    p_values_data = {"Measure": [], "Sleep_State": [], "P_Value": [], "U_Statistic": []}
+    df = df.replace({"Sleep State": {"awake": "Awake", "nrem": "NREM"}})
+
     for key in ["Ripple duration (ms)", "Ripple rate (Hz)", "Ripple amplitude (µV)"]:
         plt.figure()
         awake_p, n_rem_p = get_p_values(df, key)
-        sns.boxplot(data=df, x="Sleep State", y=key, hue="Genotype")
+
+        # Store p-values and U statistics
+        p_values_data["Measure"].extend([key, key])
+        p_values_data["Sleep_State"].extend(["awake", "nrem"])
+        p_values_data["P_Value"].extend([awake_p.pvalue, n_rem_p.pvalue])
+        p_values_data["U_Statistic"].extend([awake_p.statistic, n_rem_p.statistic])
+
+        b = sns.boxplot(
+            data=df,
+            x="Sleep State",
+            y=key,
+            hue="Genotype",
+            palette={"WT": WT_COLOR, "NLGF/S305N": NLGF_COLOR},
+            showfliers=False,
+            legend=False,
+        )
+        b.tick_params(labelsize=12)
+        b.set_xlabel("Sleep State", fontsize=14, fontweight="bold")
+        b.set_ylabel(key, fontsize=14, fontweight="bold")
+        plt.grid(axis="y")
+
+        sns.stripplot(
+            data=df,
+            x="Sleep State",
+            y=key,
+            hue="Genotype",
+            palette={"WT": WT_COLOR, "NLGF/S305N": NLGF_COLOR},
+            dodge=True,
+            alpha=1,
+            legend=False,
+            linewidth=0.5,
+        )
+
         plt.title(
-            f"Mann-Whitney U Test Results: awake: {round(awake_p.pvalue, 2)}, nrem: {round(n_rem_p.pvalue, 2)}"
+            (
+                "Ripple Duration Per State"
+                if "duration" in key
+                else (
+                    "Ripple Rate Per State"
+                    if "rate" in key
+                    else "Ripple Amplitude Per State"
+                )
+            ),
+            fontsize=16,
+            fontweight="bold",
         )
         if key == "Ripple duration (ms)":
             plt.ylim(0, 80)
         if key == "Ripple amplitude (µV)":
             plt.ylim(0, 40)
         save_figure(key, FIGURE_PATH)
+
+    # Create p-values dataframe
+    p_values_df = pd.DataFrame(p_values_data)
+
+    summary_df.to_csv(HERE / "results" / "ripples" / "ripple_summary.csv")
+    p_values_df.to_csv(
+        HERE / "results" / "ripples" / "ripple_p_values.csv", index=False
+    )
 
 
 def plot_spindle_results():
@@ -294,6 +365,10 @@ def plot_spindle_results():
     # Average across probes within a mouse
     df = df.groupby(["Genotype", "mouse_id", "Sleep State"]).mean().reset_index()
 
+    # Store p values in a dataframe
+    p_values_data = {"Measure": [], "Sleep_State": [], "P_Value": [], "U_Statistic": []}
+    df = df.replace({"Sleep State": {"awake": "Awake", "nrem": "NREM"}})
+
     for key in [
         "Spindle duration (ms)",
         "Spindle rate (min$^{-1}$)",
@@ -301,16 +376,76 @@ def plot_spindle_results():
     ]:
         awake_p, n_rem_p = get_p_values(df, key)
 
+        # Store p-values and U statistics
+        p_values_data["Measure"].extend([key, key])
+        p_values_data["Sleep_State"].extend(["awake", "nrem"])
+        p_values_data["P_Value"].extend([awake_p.pvalue, n_rem_p.pvalue])
+        p_values_data["U_Statistic"].extend([awake_p.statistic, n_rem_p.statistic])
+
         plt.figure()
-        sns.boxplot(data=df, x="Sleep State", y=key, hue="Genotype")
+        b = sns.boxplot(
+            data=df,
+            x="Sleep State",
+            y=key,
+            hue="Genotype",
+            palette={"WT": WT_COLOR, "NLGF/S305N": NLGF_COLOR},
+            showfliers=False,
+            legend=False,
+        )
+        b.tick_params(labelsize=12)
+        b.set_xlabel("Sleep State", fontsize=14, fontweight="bold")
+        b.set_ylabel(key, fontsize=14, fontweight="bold")
+        plt.grid(axis="y")
+
+        sns.stripplot(
+            data=df,
+            x="Sleep State",
+            y=key,
+            hue="Genotype",
+            palette={"WT": WT_COLOR, "NLGF/S305N": NLGF_COLOR},
+            dodge=True,
+            alpha=1,
+            legend=False,
+            linewidth=0.5,
+        )
+
         plt.title(
-            f"Mann-Whitney U Test Results: awake: {round(awake_p.pvalue, 2)}, nrem: {round(n_rem_p.pvalue, 2)}"
+            (
+                "Spindle Duration Per State"
+                if "duration" in key
+                else (
+                    "Spindle Rate Per State"
+                    if "rate" in key
+                    else "Spindle Amplitude Per State"
+                )
+            ),
+            fontsize=16,
+            fontweight="bold",
         )
         if key == "Spindle duration (ms)":
             plt.ylim(0, 1000)
         if key == "Spindle amplitude (µV)":
             plt.ylim(0, 20)
         save_figure(key, FIGURE_PATH)
+
+    # Create p-values dataframe
+    p_values_df = pd.DataFrame(p_values_data)
+
+    # Save summary and p-values
+    summary_df = df.groupby(["Genotype", "Sleep State"]).agg(
+        {
+            "Spindle rate (min$^{-1}$)": ["mean", "median", "std"],
+            "Spindle duration (ms)": ["mean", "median", "std"],
+            "Spindle amplitude (µV)": ["mean", "median", "std"],
+        }
+    )
+    summary_df.columns = ["_".join(col).strip() for col in summary_df.columns.values]
+    summary_df = summary_df.reset_index()
+
+    summary_df.to_csv(HERE / "results" / "spindles" / "spindle_summary.csv")
+    p_values_df.to_csv(
+        HERE / "results" / "spindles" / "spindle_p_values.csv", index=False
+    )
 
 
 def plot_slow_oscillation_results():
@@ -377,30 +512,104 @@ def plot_slow_oscillation_results():
     # Average across probes within a mouse
     df = df.groupby(["Genotype", "mouse_id", "Sleep State"]).mean().reset_index()
 
+    # Store p values in a dataframe
+    p_values_data = {"Measure": [], "Sleep_State": [], "P_Value": [], "U_Statistic": []}
+    df = df.replace({"Sleep State": {"awake": "Awake", "nrem": "NREM"}})
+
     for key in [
         "Slow Oscillation rate (min$^{-1}$)",
         "Slow Oscillation duration (ms)",
         "Slow Oscillation amplitude (µV)",
     ]:
         plt.figure()
-        sns.boxplot(data=df, x="Sleep State", y=key, hue="Genotype")
+        b = sns.boxplot(
+            data=df,
+            x="Sleep State",
+            y=key,
+            hue="Genotype",
+            palette={"WT": WT_COLOR, "NLGF/S305N": NLGF_COLOR},
+            showfliers=False,
+            legend=False,
+        )
+        b.tick_params(labelsize=12)
+        b.set_xlabel("Sleep State", fontsize=14, fontweight="bold")
+        b.set_ylabel(key, fontsize=14, fontweight="bold")
+        plt.grid(axis="y")
+
+        sns.stripplot(
+            data=df,
+            x="Sleep State",
+            y=key,
+            hue="Genotype",
+            palette={"WT": WT_COLOR, "NLGF/S305N": NLGF_COLOR},
+            dodge=True,
+            alpha=1,
+            legend=False,
+            linewidth=0.5,
+        )
+
         awake_p, n_rem_p = get_p_values(df, key)
+
+        # Store p-values and U statistics
+        p_values_data["Measure"].extend([key, key])
+        p_values_data["Sleep_State"].extend(["awake", "nrem"])
+        p_values_data["P_Value"].extend([awake_p.pvalue, n_rem_p.pvalue])
+        p_values_data["U_Statistic"].extend([awake_p.statistic, n_rem_p.statistic])
+
         plt.title(
-            f"Mann-Whitney U Test Results: awake: {round(awake_p.pvalue, 2)}, nrem: {round(n_rem_p.pvalue, 2)}"
+            (
+                "Slow Oscillation Duration Per State"
+                if "duration" in key
+                else (
+                    "Slow Oscillation Rate Per State"
+                    if "rate" in key
+                    else "Slow Oscillation Amplitude Per State"
+                )
+            ),
+            fontsize=16,
+            fontweight="bold",
         )
         save_figure(key, FIGURE_PATH)
 
+    # Create p-values dataframe
+    p_values_df = pd.DataFrame(p_values_data)
 
-def get_p_values(df, results_key) -> tuple[float, float]:
+    # Save summary and p-values
+    summary_df = df.groupby(["Genotype", "Sleep State"]).agg(
+        {
+            "Slow Oscillation rate (min$^{-1}$)": ["mean", "median", "std"],
+            "Slow Oscillation duration (ms)": ["mean", "median", "std"],
+            "Slow Oscillation amplitude (µV)": ["mean", "median", "std"],
+        }
+    )
+    summary_df.columns = ["_".join(col).strip() for col in summary_df.columns.values]
+    summary_df = summary_df.reset_index()
 
+    summary_df.to_csv(
+        HERE / "results" / "slow_oscillations" / "slow_oscillation_summary.csv"
+    )
+    p_values_df.to_csv(
+        HERE / "results" / "slow_oscillations" / "slow_oscillation_p_values.csv",
+        index=False,
+    )
+
+
+MannwhitneyuResult = namedtuple("MannwhitneyuResult", ("statistic", "pvalue"))
+
+
+def get_p_values(df, results_key) -> tuple[MannwhitneyuResult, MannwhitneyuResult]:
     wt = df[(df["Genotype"] == "WT")]
     nlgf = df[(df["Genotype"] == "NLGF/S305N")]
 
-    wt_awake = wt[wt["Sleep State"] == "awake"][results_key].to_numpy()
-    nlgf_awake = nlgf[nlgf["Sleep State"] == "awake"][results_key].to_numpy()
+    # Handle both original and replaced sleep state names
+    awake_states = ["awake", "Awake"]
+    nrem_states = ["nrem", "NREM"]
 
-    wt_nrem = wt[wt["Sleep State"] == "nrem"][results_key].to_numpy()
-    nlgf_nrem = nlgf[nlgf["Sleep State"] == "nrem"][results_key].to_numpy()
+    wt_awake = wt[wt["Sleep State"].isin(awake_states)][results_key].to_numpy()
+    nlgf_awake = nlgf[nlgf["Sleep State"].isin(awake_states)][results_key].to_numpy()
+
+    wt_nrem = wt[wt["Sleep State"].isin(nrem_states)][results_key].to_numpy()
+    nlgf_nrem = nlgf[nlgf["Sleep State"].isin(nrem_states)][results_key].to_numpy()
 
     awake_p = stats.mannwhitneyu(
         wt_awake,
@@ -441,14 +650,18 @@ def permutation_test(x, y, alternative=None):
     return Result(pvalue=p_value)
 
 
-def save_figure(name: str, path: Path):
-    plt.rcParams["pdf.fonttype"] = 42
-    plt.savefig(path / f"{name}.pdf", bbox_inches="tight", transparent=True)
+def signature_coupling(
+    signature1: RipplesCache | SpindleCache | SlowOscillationCache,
+    signature2: RipplesCache | SpindleCache | SlowOscillationCache,
+) -> None:
+    pass
 
 
 if __name__ == "__main__":
-    plot_ripple_results()
-    plot_spindle_results()
-    plot_slow_oscillation_results()
+    # plot_ripple_results()
+    # plot_spindle_results()
+    # plot_slow_oscillation_results()
+    signature_coupling()
+
     plt.show()
     # main()
