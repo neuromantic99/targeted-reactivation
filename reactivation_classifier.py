@@ -11,8 +11,10 @@ from sklearn import tree
 from sklearn.ensemble import RandomForestClassifier
 from data_import import Session
 from scipy.stats import zscore
+from gsheets_importer import gsheet2df
+from lfp_signatures import get_ca1_rsc_channels
 from rsync import Rsync_aligner
-from utils import get_aligners, get_data_paths, process_session
+from utils import get_aligners, get_data_paths, process_session, save_figure
 from sklearn.preprocessing import minmax_scale
 
 from scipy.stats import kruskal, mannwhitneyu
@@ -31,6 +33,13 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.feature_selection import SelectKBest, mutual_info_classif
 
 HERE = Path(__file__).parent
+
+FIGURE_PATH = HERE / "plots" / "classifier"
+
+WT_COLOR = "#1f77b4"
+NLGF_COLOR = "#ff7f0e"
+
+SHUFFLED_COLOR = sns.color_palette("tab10")[2]
 
 
 def load_spiking_data(
@@ -157,43 +166,9 @@ def split_data_by_trial_old(
     return result[:, actual_clusters, :]
 
 
-def get_ca1_rsc_mapping(
-    kilosort_path: Path | None = None, lfp_path: Path | None = None
-) -> Tuple[int, int, int, int]:
-    """Deprecated, use the gsheet"""
-
-    match = lambda p: (
-        p.parts[-1] == kilosort_path.parts[-2]
-        and p.parts[-2] == kilosort_path.parts[-3]
-        if kilosort_path is not None
-        else p.parts[-1] == lfp_path.parts[-1]
-    )
-
-    mapping_df = pd.read_csv(
-        "/Users/jamesrowland/Desktop/mouse_lfp_mapping_full_population.csv"
-    )
-    found = False
-    for _, row in mapping_df.iterrows():
-        p = PureWindowsPath(row["lfp_path"])
-        if match(p):
-            print(
-                f"Found mapping for kilosort path {kilosort_path} or lfp path {lfp_path} with {p}"
-            )
-            assert not found, "Found multiple mappings for the same kilosort path."
-            ca1_low = row["CA1_Low"]
-            ca1_high = row["CA1_High"]
-            rsc_low = row["RSC_Low"]
-            rsc_high = row["RSC_High"]
-            found = True
-
-    if found:
-        return int(ca1_low), int(ca1_high), int(rsc_low), int(rsc_high)
-
-    raise ValueError(f"Could not find mapping for kilosort path {kilosort_path}. ")
-
-
 def process_mouse(
     data_path: Path,
+    df: pd.DataFrame,
     kilosort_paths: List[Path],
     C: float,
     penalty: str,
@@ -222,9 +197,14 @@ def process_mouse(
 
         for kilosort_path in kilosort_paths:
 
+            ca1_low, ca1_high, rsc_low, rsc_high = get_ca1_rsc_channels(
+                kilosort_path, df
+            )
+
+            print(f"CA1: {ca1_low} - {ca1_high}, RSC: {rsc_low} - {rsc_high}")
+
             train_array, y_train, test_array, y_test = process_probe(
-                data_path,
-                kilosort_path,
+                data_path, kilosort_path, (ca1_low, ca1_high, rsc_low, rsc_high)
             )
             training_arrays.append(train_array)
             training_labels.append(y_train)
@@ -264,8 +244,7 @@ def process_mouse(
     np.save(
         HERE / "results" / f"{subject}_awake_shuffled_scores.npy", awake_shuffled_scores
     )
-
-    return
+    trial_states = get_sleep_state(data_path)
 
     assert len(trial_states) == testing_array.shape[0]
     trials_keep = np.isin(trial_states, ["nrem", "deep nrem"])
@@ -273,8 +252,6 @@ def process_mouse(
     print(
         f"Keeping {np.sum(trials_keep)} trials out of {len(trial_states)} based on sleep state."
     )
-    if np.sum(trials_keep) < 20:
-        1 / 0
 
     testing_array = testing_array[trials_keep, :, :]
     testing_labels = testing_labels[0][trials_keep]
@@ -319,9 +296,14 @@ def process_mouse(
 def process_probe(
     data_path: Path,
     kilosort_path: Path,
+    region_boundaries: Tuple[int, int, int, int],
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    CA1_Low, CA1_High, RSC_Low, RSC_High = get_ca1_rsc_mapping(kilosort_path)
-    print(f"CA1: {CA1_Low} - {CA1_High}, RSC: {RSC_Low} - {RSC_High}")
+
+    ca1_low, ca1_high, rsc_low, rsc_high = region_boundaries
+
+    assert ca1_low < ca1_high < rsc_low < rsc_high
+    assert 30 <= ca1_high - ca1_low <= 70
+    assert 80 <= rsc_high - rsc_low <= 120
 
     _, _, pycontrol_files = get_data_paths(data_path)
     sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
@@ -349,14 +331,14 @@ def process_probe(
     )
 
     idx_keep = (labels == "good") & (
-        (closest_channel >= CA1_Low) & (closest_channel <= CA1_High)
-    ) | ((closest_channel >= RSC_Low) & (closest_channel <= RSC_High))
+        (closest_channel >= ca1_low) & (closest_channel <= ca1_high)
+    ) | ((closest_channel >= rsc_low) & (closest_channel <= rsc_high))
 
-    # idx_keep = ((closest_channel >= CA1_Low) & (closest_channel <= CA1_High)) | (
-    #     (closest_channel >= RSC_Low) & (closest_channel <= RSC_High)
+    # idx_keep = ((closest_channel >= ca1_low) & (closest_channel <= ca1_high)) | (
+    #     (closest_channel >= rsc_low) & (closest_channel <= rsc_high)
     # )
 
-    # idx_keep = (closest_channel >= CA1_Low) & (closest_channel <= CA1_High)
+    # idx_keep = (closest_channel >= ca1_low) & (closest_channel <= ca1_high)
     # idx_keep = labels == "good"
 
     good = spike_times[idx_keep]
@@ -448,7 +430,7 @@ def fit_classifier_to_sleeping_data(
     # return score, shuffled_scores
     zscore = (score - np.mean(shuffled_scores)) / np.std(shuffled_scores)
     assert not np.isnan(zscore), "Z-score is NaN. Likely only one label is predicted"
-    return zscore, shuffled_scores
+    return score, shuffled_scores
 
 
 def get_testing_data(
@@ -531,8 +513,10 @@ def get_awake_classifier(
     for _ in range(100):
         shuffle_idx = np.random.permutation(len(y_encoded))
         y_shuffled = y_encoded[shuffle_idx]
-        scores = cross_val_score(model, X, y_shuffled, cv=cv, scoring="accuracy")
-        shuffled_scores.append(scores.mean())
+        shuffled_score = cross_val_score(
+            model, X, y_shuffled, cv=cv, scoring="accuracy"
+        )
+        shuffled_scores.append(shuffled_score.mean())
 
     return model, le, scores.mean(), shuffled_scores
 
@@ -581,7 +565,7 @@ def get_training_data(
 
 
 def plot_processed_data() -> float:
-    # results_path = Path(__file__).parent / "results" / "alex_results_working"
+    # results_path = Path(__file__).parent / "results"
     results_path = Path("/Volumes/MarcBusche/James/Alex/alex_results_working")
 
     mice = set([file.stem.split("_")[0] for file in results_path.glob("*.npy")])
@@ -595,11 +579,11 @@ def plot_processed_data() -> float:
             continue
         score = np.load(results_path / f"{mouse}_classifier_score.npy").item()
         awake_scores.append(np.load(results_path / f"{mouse}_awake_scores.npy").item())
+        shuffled_label_scores.extend(
+            np.load(results_path / f"{mouse}_classifier_shuffled_labels.npy")
+        )
 
         if mouse[:3] == "000":
-            shuffled_label_scores.extend(
-                np.load(results_path / f"{mouse}_classifier_shuffled_labels.npy")
-            )
             WT_scores.append(score)
             print(f"Mouse {mouse} is WT")
         else:
@@ -607,37 +591,73 @@ def plot_processed_data() -> float:
             print(f"Mouse {mouse} is NLGF/S305N")
 
     plt.figure()
-    sns.boxplot(
+    b = sns.boxplot(
         data={
             "WT": WT_scores,
-            "NLGF/S305N": NLGF_scores,
-            "shuffled_labels": shuffled_label_scores,
+            "NLGFxS305N": NLGF_scores,
+            "Shuffled": shuffled_label_scores,
         },
+        palette={"WT": WT_COLOR, "NLGFxS305N": NLGF_COLOR, "Shuffled": SHUFFLED_COLOR},
         showfliers=False,
     )
 
-    plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
-    plt.legend()
-    p1 = round(
-        mannwhitneyu(WT_scores, shuffled_label_scores, alternative="two-sided").pvalue,
-        3,
-    )
-    p2 = round(
-        mannwhitneyu(
-            NLGF_scores, shuffled_label_scores, alternative="two-sided"
-        ).pvalue,
-        3,
-    )
-    p3 = round(mannwhitneyu(WT_scores, NLGF_scores, alternative="two-sided").pvalue, 3)
-    plt.title(
-        f"WT vs NLGF/S305N: {p3}, WT vs shuffled: {p1}, NLGF/S305N vs shuffled: {p2}"
+    sns.stripplot(
+        data={
+            "WT": WT_scores,
+            "NLGFxS305N": NLGF_scores,
+        },
+        palette={"WT": WT_COLOR, "NLGFxS305N": NLGF_COLOR},
+        dodge=False,
+        alpha=1,
+        legend=False,
+        linewidth=0.5,
     )
 
+    b.tick_params(labelsize=12)
+    b.set_xlabel("Genotype", fontsize=14, fontweight="bold")
+    b.set_ylabel("Classification Accuracy", fontsize=14, fontweight="bold")
+    plt.grid(axis="y")
+    plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
+    plt.ylim(None, 0.75)
+    plt.legend(loc="upper right")
+
+    p1 = mannwhitneyu(WT_scores, shuffled_label_scores, alternative="two-sided")
+    p2 = mannwhitneyu(NLGF_scores, shuffled_label_scores, alternative="two-sided")
+    p3 = mannwhitneyu(WT_scores, NLGF_scores, alternative="two-sided")
+
+    plt.title(
+        "Classification accuracy (targeted reactivation)",
+        fontsize=16,
+        fontweight="bold",
+    )
+
+    save_figure("sleeping", FIGURE_PATH)
+
+    summary_df = {
+        "wt_mean": np.mean(WT_scores),
+        "wt_median": np.median(WT_scores),
+        "wt_std": np.std(WT_scores),
+        "nlgf_mean": np.mean(NLGF_scores),
+        "nlgf_median": np.median(NLGF_scores),
+        "nlgf_std": np.std(NLGF_scores),
+        "shuffled_mean": np.mean(shuffled_label_scores),
+        "shuffled_median": np.median(shuffled_label_scores),
+        "shuffled_std": np.std(shuffled_label_scores),
+        "wt_vs_shuffled_p": p1.pvalue,
+        "wt_vs_shuffled_u": p1.statistic,
+        "nlgf_vs_shuffled_p": p2.pvalue,
+        "nlgf_vs_shuffled_u": p2.statistic,
+        "wt_vs_nlgf_p": p3.pvalue,
+        "wt_vs_nlgf_u": p3.statistic,
+    }
+    pd.DataFrame(summary_df, index=[0]).to_csv(
+        FIGURE_PATH / "sleep_summary_stats.csv", index=False
+    )
     return np.mean(awake_scores)
 
 
 def plot_processed_data_waking() -> float:
-    # results_path = Path(__file__).parent / "results" / "alex_results_working"
+    # results_path = Path(__file__).parent / "results"
     results_path = Path("/Volumes/MarcBusche/James/Alex/alex_results_working")
     mice = set([file.stem.split("_")[0] for file in results_path.glob("*.npy")])
     WT_scores = []
@@ -658,27 +678,71 @@ def plot_processed_data_waking() -> float:
             NLGF_scores.append(score)
 
     plt.figure()
-    sns.boxplot(
+    b = sns.boxplot(
         data={
             "WT": WT_scores,
-            "NLGF/S305N": NLGF_scores,
-            "shuffled_labels": shuffled_label_scores,
+            "NLGFxS305N": NLGF_scores,
+            "Shuffled": shuffled_label_scores,
         },
+        palette={"WT": WT_COLOR, "NLGFxS305N": NLGF_COLOR, "Shuffled": SHUFFLED_COLOR},
         showfliers=False,
     )
 
-    plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
-    plt.legend()
-    p1 = round(
-        mannwhitneyu(WT_scores, NLGF_scores, alternative="two-sided").pvalue,
-        3,
+    sns.stripplot(
+        data={
+            "WT": WT_scores,
+            "NLGFxS305N": NLGF_scores,
+        },
+        palette={"WT": WT_COLOR, "NLGFxS305N": NLGF_COLOR},
+        dodge=False,
+        alpha=1,
+        legend=False,
+        linewidth=0.5,
     )
-    plt.title(f"WT vs NLGF/S305N: {p1}")
+
+    plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
+    plt.legend(loc="upper right")
+    b.tick_params(labelsize=12)
+    b.set_xlabel("Genotype", fontsize=14, fontweight="bold")
+    b.set_ylabel("Classification Accuracy", fontsize=14, fontweight="bold")
+    plt.grid(axis="y")
+    plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
+
+    plt.title("Classification accuracy (waking)", fontsize=16, fontweight="bold")
+
+    p1 = mannwhitneyu(WT_scores, shuffled_label_scores, alternative="two-sided")
+    p2 = mannwhitneyu(NLGF_scores, shuffled_label_scores, alternative="two-sided")
+    p3 = mannwhitneyu(WT_scores, NLGF_scores, alternative="two-sided")
+
+    summary_df = {
+        "wt_mean": np.mean(WT_scores),
+        "wt_median": np.median(WT_scores),
+        "wt_std": np.std(WT_scores),
+        "nlgf_mean": np.mean(NLGF_scores),
+        "nlgf_median": np.median(NLGF_scores),
+        "nlgf_std": np.std(NLGF_scores),
+        "shuffled_mean": np.mean(shuffled_label_scores),
+        "shuffled_median": np.median(shuffled_label_scores),
+        "shuffled_std": np.std(shuffled_label_scores),
+        "wt_vs_shuffled_p": p1.pvalue,
+        "wt_vs_shuffled_u": p1.statistic,
+        "nlgf_vs_shuffled_p": p2.pvalue,
+        "nlgf_vs_shuffled_u": p2.statistic,
+        "wt_vs_nlgf_p": p3.pvalue,
+        "wt_vs_nlgf_u": p3.statistic,
+    }
+    pd.DataFrame(summary_df, index=[0]).to_csv(
+        FIGURE_PATH / "waking_summary_stats.csv", index=False
+    )
+
+    save_figure("waking", FIGURE_PATH)
 
 
 def main() -> None:
 
     umbrella = Path("/Volumes/MarcBusche/Alex/Reactivations")
+
+    df = gsheet2df("112rq_5qilRHtYUFnFwpjDQeF4XKyTdY6qJhIwAnykN8", "Sheet1", 1)
 
     kilosort_paths = list(umbrella.rglob("*/kilosort4"))
     path_dict: Dict[str, List[Path]] = {}
@@ -708,8 +772,9 @@ def main() -> None:
                     for kilosort_path in kilosort_paths
                 ]
             )
+
             data_path = kilosort_paths[0].parent.parent.parent
-            process_mouse(data_path, kilosort_paths, C, penalty, solver, offset=0)
+            process_mouse(data_path, df, kilosort_paths, C, penalty, solver, offset=0)
 
         # awake_score = plot_processed_data()
         # plt.title(
@@ -868,10 +933,9 @@ def apply_principled_threshold_correction(
     label_encoder: LabelEncoder,
     offset: int = 0,
     validation_split: float = 0.5,
+    verbose: bool = False,
 ) -> Tuple[float, List[float], float]:
     """Apply threshold correction with proper validation to avoid data snooping."""
-
-    print("\n" + "=" * 30 + " PRINCIPLED THRESHOLD CORRECTION " + "=" * 30)
 
     X = X_from_trial_array(trial_array.copy(), offset=offset)
     blue_encoding, orange_encoding = label_encoder.transform(["blue", "orange"])
@@ -903,8 +967,9 @@ def apply_principled_threshold_correction(
     eval_idx = shuffle_idx[split_idx:]
     X_eval, y_eval = X[eval_idx], y_encoded[eval_idx]
 
-    print(f"Using {len(opt_idx)} trials for threshold optimization")
-    print(f"Using {len(eval_idx)} trials for evaluation")
+    if verbose:
+        print(f"Using {len(opt_idx)} trials for threshold optimization")
+        print(f"Using {len(eval_idx)} trials for evaluation")
 
     # Find optimal threshold on optimization set
     decision_scores_opt = awake_model.decision_function(X_opt)
@@ -926,13 +991,16 @@ def apply_principled_threshold_correction(
 
     optimal_threshold = thresholds[np.argmax(accuracies)]
 
-    print(f"Optimal threshold found: {optimal_threshold:.4f}")
+    if verbose:
+        print(f"Optimal threshold found: {optimal_threshold:.4f}")
 
     # Apply threshold to evaluation set (unseen during optimization)
     decision_scores_eval = awake_model.decision_function(X_eval)
     corrected_predictions = (decision_scores_eval > optimal_threshold).astype(int)
 
     score = balanced_accuracy_score(y_eval, corrected_predictions)
+    if verbose:
+        print(f"principle threshold score: {score:.4f}")
     # assert not np.all(
     #     corrected_predictions == corrected_predictions[0]
     # ), "All predictions are the same. This indicates a problem with the threshold or the data."
@@ -977,6 +1045,7 @@ def apply_cross_domain_normalization(
     penalty: str,
     solver: str,
     offset: int = 0,
+    verbose: bool = False,
 ) -> Tuple[float, np.ndarray, LogisticRegression, LabelEncoder]:
     """
     Apply cross-domain normalization: normalize features across both domains,
@@ -986,16 +1055,15 @@ def apply_cross_domain_normalization(
     have similar feature distributions.
     """
 
-    print("\n" + "=" * 30 + " CROSS-DOMAIN NORMALIZATION " + "=" * 30)
-
     # Extract features from both domains
     X_train = X_from_trial_array(training_array.copy(), offset=offset)
     X_test = X_from_trial_array(testing_array.copy(), offset=offset)
 
-    print(f"Original training data shape: {X_train.shape}")
-    print(f"Original testing data shape: {X_test.shape}")
-    print(f"Training mean activity: {X_train.mean():.4f}")
-    print(f"Testing mean activity: {X_test.mean():.4f}")
+    if verbose:
+        print(f"Original training data shape: {X_train.shape}")
+        print(f"Original testing data shape: {X_test.shape}")
+        print(f"Training mean activity: {X_train.mean():.4f}")
+        print(f"Testing mean activity: {X_test.mean():.4f}")
 
     # Combine data for normalization statistics
     X_combined = np.vstack([X_train, X_test])
@@ -1024,8 +1092,9 @@ def apply_cross_domain_normalization(
         ]
     )
 
-    print(f"Training labels: {len(y_train_encoded)} samples")
-    print(f"Testing labels: {len(y_test_encoded)} samples")
+    if verbose:
+        print(f"Training labels: {len(y_train_encoded)} samples")
+        print(f"Testing labels: {len(y_test_encoded)} samples")
 
     # Train new model on normalized training data
     model_norm = LogisticRegression(
@@ -1041,9 +1110,13 @@ def apply_cross_domain_normalization(
     ), "All predictions are the same. This indicates a problem with the normalization or the data."
 
     score = balanced_accuracy_score(y_test_encoded, predictions)
+
+    if verbose:
+        print(f"cross norm score: {score}")
     return score, None, None, None
 
-    print(f"Cross-domain normalized accuracy: {score:.4f}")
+    if verbose:
+        print(f"Cross-domain normalized accuracy: {score:.4f}")
 
     # Calculate z-score with shuffled data (using normalized features)
     shuffled_scores = []
@@ -1056,10 +1129,11 @@ def apply_cross_domain_normalization(
 
     zscore = (score - np.mean(shuffled_scores)) / np.std(shuffled_scores)
 
-    print(f"Cross-domain normalized Z-score: {zscore:.3f}")
-    print(f"Shuffled mean: {np.mean(shuffled_scores):.4f}")
-    print(f"Shuffled std: {np.std(shuffled_scores):.4f}")
-    print("=" * 75)
+    if verbose:
+        print(f"Cross-domain normalized Z-score: {zscore:.3f}")
+        print(f"Shuffled mean: {np.mean(shuffled_scores):.4f}")
+        print(f"Shuffled std: {np.std(shuffled_scores):.4f}")
+        print("=" * 75)
 
     return score, shuffled_scores, model_norm, label_encoder_new
 
@@ -1157,7 +1231,12 @@ def compare_classification_methods_rigorous(
     # print("\n2. PRINCIPLED THRESHOLD CORRECTION:")
 
     principled_zscore, _, threshold = apply_principled_threshold_correction(
-        testing_array.copy(), testing_labels, model, label_encoder, offset=offset
+        testing_array.copy(),
+        testing_labels,
+        model,
+        label_encoder,
+        offset=offset,
+        verbose=True,
     )
 
     results["principled_threshold"] = principled_zscore
@@ -1165,48 +1244,44 @@ def compare_classification_methods_rigorous(
     shuffled_result = []
     for _ in range(100):
         np.random.shuffle(testing_labels)
-        principled_zscore, _, threshold = apply_principled_threshold_correction(
+        principle_zscore_shuffled, _, threshold = apply_principled_threshold_correction(
             testing_array.copy(), testing_labels, model, label_encoder, offset=offset
         )
-        shuffled_result.append(principled_zscore)
+        shuffled_result.append(principle_zscore_shuffled)
 
     results["principled_threshold_shuffled_labels"] = shuffled_result
 
     # 4. Cross-domain normalization
 
-    ################
-    # print("\n3. CROSS-DOMAIN NORMALIZATION:")
-    # cross_norm_score, _, _, _ = apply_cross_domain_normalization(
-    #     training_array.copy(),
-    #     testing_array.copy(),
-    #     training_labels,
-    #     testing_labels,
-    #     C,
-    #     penalty,
-    #     solver,
-    #     offset=offset,
-    # )
+    ###############
+    print("\n3. CROSS-DOMAIN NORMALIZATION:")
+    cross_norm_score, _, _, _ = apply_cross_domain_normalization(
+        training_array.copy(),
+        testing_array.copy(),
+        training_labels,
+        testing_labels,
+        C,
+        penalty,
+        solver,
+        offset=offset,
+        verbose=True,
+    )
 
-    # shuffled_result = []
+    shuffled_result = []
 
-    # for _ in range(100):
-    #     np.random.shuffle(testing_labels)
-    #     domain_zscore_shuffled_labels, _, _, _ = apply_cross_domain_normalization(
-    #         training_array.copy(),
-    #         testing_array.copy(),
-    #         training_labels,
-    #         testing_labels,
-    #         C,
-    #         penalty,
-    #         solver,
-    #         offset=offset,
-    #     )
-    #     shuffled_result.append(domain_zscore_shuffled_labels)
-
-    # ##########################################3
-
-    # results["principled_threshold"] = principled_zscore
-    # results["principled_threshold_shuffled_labels"] = principled_zscore_shuffled_labels
+    for _ in range(100):
+        np.random.shuffle(testing_labels)
+        domain_zscore_shuffled_labels, _, _, _ = apply_cross_domain_normalization(
+            training_array.copy(),
+            testing_array.copy(),
+            training_labels,
+            testing_labels,
+            C,
+            penalty,
+            solver,
+            offset=offset,
+        )
+        shuffled_result.append(domain_zscore_shuffled_labels)
 
     # results["cross_domain"] = cross_norm_score
     # results["cross_domain_shuffled_labels"] = shuffled_result
@@ -1215,7 +1290,7 @@ def compare_classification_methods_rigorous(
 
 
 if __name__ == "__main__":
-    plot_processed_data()
-    # plot_processed_data_waking()
-    plt.show()
     # main()
+    plot_processed_data()
+    plot_processed_data_waking()
+    plt.show()
