@@ -2,6 +2,7 @@ plots/
 *.png
 *.npy
 *.json
+*.csv
 token.pickle
 credentials.json
 

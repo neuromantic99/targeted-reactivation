@@ -11,6 +11,10 @@ from models import LED, Sound
 from rsync import Rsync_aligner
 
 
+HERE = Path(__file__).parent
+FIGURE_PATH = HERE / "plots" / "classifier"
+
+
 def get_number_of_frames(video_path: Path) -> int:
     return int(cv2.VideoCapture(str(video_path)).get(cv2.CAP_PROP_FRAME_COUNT))
 
@@ -267,3 +271,8 @@ def get_lfp_index_sleep_state(
         plt.legend()
 
     return state_idxs
+
+
+def save_figure(name: str, path: Path):
+    plt.rcParams["pdf.fonttype"] = 42
+    plt.savefig(path / f"{name}.pdf", bbox_inches="tight", transparent=True)
