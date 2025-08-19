@@ -1,6 +1,6 @@
 import numpy as np
 
-from lfp_signatures import get_baseline_spindles
+from lfp_signatures import get_baseline_events
 
 
 def test_get_baseline_spindles() -> None:
@@ -8,7 +8,7 @@ def test_get_baseline_spindles() -> None:
     ripple_times = np.array([150, 250])
     ripple_distance = 20
 
-    baseline_spindles = get_baseline_spindles(
+    baseline_spindles = get_baseline_events(
         spindle_times, ripple_times, ripple_distance
     )
 
@@ -22,7 +22,7 @@ def test_get_baseline_spindles2() -> None:
     ripple_times = np.array([1, 10000])
     ripple_distance = 20
 
-    baseline_spindles = get_baseline_spindles(
+    baseline_spindles = get_baseline_events(
         spindle_times, ripple_times, ripple_distance
     )
 
@@ -36,7 +36,7 @@ def test_get_baseline_spindles3() -> None:
     ripple_times = np.array([100, 102, 103, 250, 249, 300, 301])
     ripple_distance = 5
 
-    baseline_spindles = get_baseline_spindles(
+    baseline_spindles = get_baseline_events(
         spindle_times, ripple_times, ripple_distance
     )
 
