@@ -618,7 +618,7 @@ def plot_processed_data() -> float:
     b.set_ylabel("Classification Accuracy", fontsize=14, fontweight="bold")
     plt.grid(axis="y")
     plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
-    plt.ylim(None, 0.75)
+    plt.ylim(0.3, 0.9)
     plt.legend(loc="upper right")
 
     p1 = mannwhitneyu(WT_scores, shuffled_label_scores, alternative="two-sided")
@@ -706,6 +706,7 @@ def plot_processed_data_waking() -> float:
     b.set_xlabel("Genotype", fontsize=14, fontweight="bold")
     b.set_ylabel("Classification Accuracy", fontsize=14, fontweight="bold")
     plt.grid(axis="y")
+    plt.ylim(0.3, 0.9)
     plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
 
     plt.title("Classification accuracy (waking)", fontsize=16, fontweight="bold")
