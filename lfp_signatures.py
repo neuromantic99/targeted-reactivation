@@ -9,6 +9,7 @@ from ripples.utils import (
     threshold_detect,
 )
 from scipy import stats
+from scipy.ndimage import gaussian_filter1d
 import seaborn as sns
 import traceback
 
@@ -28,6 +29,7 @@ from main import HERE, get_aligners
 
 import matplotlib.pyplot as plt
 
+from plotting import shaded_line_plot
 from utils import get_data_paths
 from collections import namedtuple
 from utils import save_figure
@@ -650,18 +652,158 @@ def permutation_test(x, y, alternative=None):
     return Result(pvalue=p_value)
 
 
-def signature_coupling(
-    signature1: RipplesCache | SpindleCache | SlowOscillationCache,
-    signature2: RipplesCache | SpindleCache | SlowOscillationCache,
-) -> None:
-    pass
+def get_baseline_spindles(
+    spindle_times: np.ndarray, ripple_times: np.ndarray, ripple_distance: float
+):
+    diffs = np.abs(spindle_times[:, None] - ripple_times[None, :])
+    # Mask spindles that are farther than ripple_distance from all ripples
+    mask = np.all(diffs > ripple_distance, axis=1)
+    return spindle_times[mask]
+
+
+def ripple_spindle_coupling(
+    ripples_cache: RipplesCache,
+    other_cache: SpindleCache | SlowOscillationCache,
+    mouse: str,
+    bins: np.ndarray,
+) -> np.ndarray:
+
+    passing_checks = (
+        np.array(ripples_cache.common_average_reference_check)
+        & np.array(ripples_cache.frequency_check)
+        & np.array(ripples_cache.super_ripple_check)
+    )
+    if mouse == "00053":
+        passing_checks = passing_checks[: len(ripples_cache.candidate_events)]
+
+    ripples = np.array(ripples_cache.candidate_events)[passing_checks]
+    ripple_states = np.array(ripples_cache.state)[passing_checks]
+
+    nrem_ripples = ripples[ripple_states == "nrem"]
+
+    if other_cache.__class__.__name__ == "SpindleCache":
+        nrem_spindles = np.array(other_cache.spindles)[
+            np.array(other_cache.state) == "nrem"
+        ]
+        other_event_times = np.array([spindle.peak_idx for spindle in nrem_spindles])
+
+    else:
+        other_event_times = (
+            (np.array(other_cache.starts) + np.array(other_cache.ends)) / 2
+        )[np.array(other_cache.state) == "nrem"]
+
+    ripple_times = np.array([ripple.peak_idx for ripple in nrem_ripples])
+    if len(other_event_times) == 0:
+        return None
+
+    ripple_spindle_distance = 0.1 * 2500
+    baseline_spindles = get_baseline_spindles(
+        other_event_times, ripple_times, ripple_distance=ripple_spindle_distance
+    )
+
+    coupling_matrix = np.array(
+        [
+            np.histogram(
+                (other_event_times - ripple_time) / 2500,
+                bins=bins,
+                range=(bins[0], bins[-1]),
+            )[0]
+            for ripple_time in ripple_times
+        ]
+    )
+
+    # baseline_rate = len(baseline_spindles) / (
+    #     (
+    #         spindle_cache.state_lengths["nrem"]
+    #         - (len(nrem_ripples) * ripple_spindle_distance * 2)
+    #     )
+    #     / 2500
+    # )
+    # print(baseline_rate * 60)
+    baseline_rate = len(other_event_times) / (other_cache.state_lengths["nrem"] / 2500)
+
+    coupling_matrix = (coupling_matrix * (1 / (bins[1] - bins[0]))) / baseline_rate
+
+    return coupling_matrix
+
+
+def get_coupling_results():
+
+    ripple_files = list((HERE / "results" / "ripples").glob("*.json"))
+
+    wt_result = []
+    nlgf_result = []
+
+    bin_size = 25 / 1000
+    bins = np.arange(-2, 2 + bin_size, bin_size)
+
+    for ripple_file in ripple_files:
+        mouse = ripple_file.name.split("_")[0]
+        imec = ripple_file.stem[-1]
+        spindle_file = HERE / "results" / "spindles" / f"{mouse}_imec_{imec}.json"
+        slow_oscillation_file = (
+            HERE / "results" / "slow_oscillations" / f"{mouse}_imec_{imec}.json"
+        )
+        assert spindle_file.exists(), f"Spindle file {spindle_file} does not exist"
+        assert spindle_file.stem == ripple_file.stem
+        coupling_matrix = ripple_spindle_coupling(
+            RipplesCache.model_validate_json(ripple_file.read_text()),
+            # SpindleCache.model_validate_json(spindle_file.read_text()),
+            SlowOscillationCache.model_validate_json(slow_oscillation_file.read_text()),
+            mouse,
+            bins=bins,
+        )
+        if coupling_matrix is None:
+            continue
+
+        if mouse[:3] == "000":
+            print(f"Mouse  {mouse} is WT")
+            wt_result.append(coupling_matrix)
+            # wt_n_spindles += n_baseline_spindles
+            # wt_length_nrem += length_nrem
+        else:
+            print(f"Mouse  {mouse} is NLGF")
+            nlgf_result.append(coupling_matrix)
+            # nlgf_n_spindles += n_baseline_spindles
+            # nlgf_length_nrem += length_nrem
+
+    wt = np.concatenate(wt_result)
+    nlgf = np.concatenate(nlgf_result)
+
+    wt_sum = np.mean(wt, axis=0)
+    nlgf_sum = np.mean(nlgf, axis=0)
+
+    bin_centers = bins[:-1] + bin_size / 2
+
+    sigma_seconds = 0.1
+    sigma_bins = sigma_seconds / bin_size
+    plt.plot(
+        bin_centers,
+        gaussian_filter1d(wt_sum, sigma=sigma_bins),
+        color=WT_COLOR,
+        label="WT",
+    )
+    plt.plot(
+        bin_centers,
+        gaussian_filter1d(nlgf_sum, sigma=sigma_bins),
+        color=NLGF_COLOR,
+        label="NLGFxS305N",
+    )
+
+    plt.legend()
+    plt.xlim(-1.5, 1.5)
+    plt.xlabel("Time from Ripple Peak (s)", fontsize=14, fontweight="bold")
+    plt.ylabel(
+        "Slow oscillation Rate (fold change from baseline)",
+        fontsize=14,
+        fontweight="bold",
+    )
+
+    # shaded_line_plot(arr=wt, x_axis=bin_centers, color=WT_COLOR, label="WT")
+    # shaded_line_plot(arr=nlgf, x_axis=bin_centers, color=NLGF_COLOR, label="NLGFxS305N")
+    1 / 0
+    # plt.show()
 
 
 if __name__ == "__main__":
-    # plot_ripple_results()
-    # plot_spindle_results()
-    # plot_slow_oscillation_results()
-    signature_coupling()
-
-    plt.show()
-    # main()
+    get_coupling_results()
