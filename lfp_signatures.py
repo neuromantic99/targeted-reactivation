@@ -4,7 +4,6 @@ from pathlib import Path, PureWindowsPath
 from typing import Tuple
 import numpy as np
 import pandas as pd
-from ripples.models import CandidateEvent
 from ripples.utils import (
     threshold_detect,
 )
@@ -29,12 +28,10 @@ from main import HERE, get_aligners
 
 import matplotlib.pyplot as plt
 
-from plotting import shaded_line_plot
 from utils import get_data_paths
 from collections import namedtuple
 from utils import save_figure
 
-HERE = Path(__file__).parent
 
 FIGURE_PATH = HERE / "plots" / "lfp_signatures"
 
@@ -576,7 +573,6 @@ def plot_slow_oscillation_results():
     # Create p-values dataframe
     p_values_df = pd.DataFrame(p_values_data)
 
-    # Save summary and p-values
     summary_df = df.groupby(["Genotype", "Sleep State"]).agg(
         {
             "Slow Oscillation rate (min$^{-1}$)": ["mean", "median", "std"],
@@ -656,6 +652,7 @@ def get_baseline_events(
     spindle_times: np.ndarray, ripple_times: np.ndarray, distance_seconds: float
 ):
     diffs = np.abs(spindle_times[:, None] - ripple_times[None, :])
+
     # Mask spindles that are farther than distance_seconds from all ripples
     mask = np.all(diffs > distance_seconds, axis=1)
     return spindle_times[mask]
@@ -664,7 +661,6 @@ def get_baseline_events(
 def get_peak_times_for_coupling(
     cache: RipplesCache | SpindleCache | SlowOscillationCache, mouse: str
 ) -> np.ndarray:
-
     match cache.__class__.__name__:
         case "RipplesCache":
             passing_checks = (
@@ -711,7 +707,6 @@ def get_coupling_matrix(
     bins: np.ndarray,
     remove_events_from_baseline: bool,
 ) -> np.ndarray:
-
     times1 = get_peak_times_for_coupling(cache1, mouse)
     times2 = get_peak_times_for_coupling(cache2, mouse)
 
@@ -732,8 +727,9 @@ def get_coupling_matrix(
 
     if remove_events_from_baseline:
         removal_distance = 0.1 * 2500
+
         baseline_events = get_baseline_events(
-            times2, times1, ripple_distance=removal_distance
+            times2, times1, distance_seconds=removal_distance
         )
         baseline_rate = len(baseline_events) / (
             (cache1.state_lengths["nrem"] - (len(times1) * removal_distance * 2)) / 2500
@@ -748,7 +744,6 @@ def get_coupling_matrix(
 
 
 def get_coupling_results():
-
     ripple_files = list((HERE / "results" / "ripples").glob("*.json"))
 
     wt_result = []
@@ -823,7 +818,6 @@ def get_coupling_results():
 
     # shaded_line_plot(arr=wt, x_axis=bin_centers, color=WT_COLOR, label="WT")
     # shaded_line_plot(arr=nlgf, x_axis=bin_centers, color=NLGF_COLOR, label="NLGFxS305N")
-    1 / 0
     # plt.show()
 
 
