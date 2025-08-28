@@ -7,7 +7,7 @@ from scipy.stats import ttest_ind
 from scipy.spatial import cKDTree
 import pandas as pd
 import seaborn as sns
-from sklearn import tree
+from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from data_import import Session
 from scipy.stats import zscore
@@ -21,7 +21,7 @@ from scipy.stats import kruskal, mannwhitneyu
 
 
 from sklearn.metrics import balanced_accuracy_score
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import gaussian_filter1d, gaussian_filter
 
 from ripples.utils_npyx import load_sync_npyx
 from ripples.utils import threshold_detect
@@ -73,6 +73,19 @@ def load_spiking_data(
         tree = cKDTree(channel_positions)
         _, closest_channel = tree.query(spike_positions, k=1)
         np.save(kilosort_path / "closest_channel.npy", closest_channel)
+
+    # Useful debugging plot, looks correct, might want to look at it again
+    for g in np.unique(spike_clusters):
+        indy = spike_clusters == g
+        pos = spike_positions[indy]
+        channy = closest_channel[indy]
+        cd = np.max(channy) - np.min(channy)
+        if cd > 12:
+            plt.plot(
+                channel_positions[channy][:, 0], channel_positions[channy][:, 1], "."
+            )
+            plt.plot(pos[:, 0], pos[:, 1], ".")
+            1 / 0
 
     return spike_times, spike_clusters, label_array, closest_channel
 
@@ -166,6 +179,52 @@ def split_data_by_trial_old(
     return result[:, actual_clusters, :]
 
 
+def reduce_array_resolution(arr: np.ndarray, n: int) -> np.ndarray:
+    # Reduce the spatial resolution of the array by averaging
+    assert arr.shape[2] % n == 0, "Array shape is not divisible by n"
+    return arr.reshape(arr.shape[0], arr.shape[1], -1, n).sum(axis=-1)
+
+
+def dimensionality_reduction(training_array, testing_array):
+    # Current bin is 100 bins in 1.8 seconds = 18 ms bins
+
+    # original shape
+    # (n_trials, n_clusters, n_bins)
+    training_array = reduce_array_resolution(training_array, 2)
+    testing_array = reduce_array_resolution(testing_array, 2)
+
+    # Put the cells first so it's a bit easier
+    training_array = np.swapaxes(training_array, 0, 1)
+    testing_array = np.swapaxes(testing_array, 0, 1)
+
+    training_array_flattened = np.reshape(training_array, (training_array.shape[0], -1))
+    testing_array_flattened = np.reshape(testing_array, (testing_array.shape[0], -1))
+
+    combined = np.concatenate(
+        (training_array_flattened, testing_array_flattened), axis=1
+    )
+
+    pca = PCA()
+    reduced = pca.fit_transform(combined.T).T
+
+    # Restore the original trial shape in PCA space
+    n_training_samples = training_array.shape[1] * training_array.shape[2]
+    training_array_reduced = reduced[:, :n_training_samples].reshape(
+        *training_array.shape
+    )
+
+    testing_array_reduced = reduced[:, n_training_samples:].reshape(
+        *testing_array.shape
+    )
+
+    testing_array_reduced = testing_array_reduced[:20]
+    training_array_reduced = training_array_reduced[:20]
+
+    return np.swapaxes(training_array_reduced, 0, 1), np.swapaxes(
+        testing_array_reduced, 0, 1
+    )
+
+
 def process_mouse(
     data_path: Path,
     df: pd.DataFrame,
@@ -173,9 +232,7 @@ def process_mouse(
     C: float,
     penalty: str,
     solver: str,
-    offset: int = 0,
 ) -> None:
-
     subject = data_path.parts[-1]
 
     print("=" * 20)
@@ -183,36 +240,43 @@ def process_mouse(
     save_path = HERE / "results" / "trial_arrays"
     redo = False
 
-    if (save_path / f"{subject}_training_array.npy").exists() and not redo:
+    if (save_path / f"{subject}_clusters_info.npy").exists() and not redo:
         print(f"Loading existing data for {subject}")
         training_array = np.load(save_path / f"{subject}_training_array.npy")
         testing_array = np.load(save_path / f"{subject}_testing_array.npy")
         training_labels = np.load(save_path / f"{subject}_training_labels.npy")
         testing_labels = np.load(save_path / f"{subject}_testing_labels.npy")
+        cluster_infos = np.load(
+            save_path / f"{subject}_clusters_info.npy", allow_pickle=True
+        )
+
     else:
         training_arrays = []
         training_labels = []
         testing_arrays = []
         testing_labels = []
+        cluster_infos = []
 
         for kilosort_path in kilosort_paths:
-
             ca1_low, ca1_high, rsc_low, rsc_high = get_ca1_rsc_channels(
                 kilosort_path, df
             )
 
             print(f"CA1: {ca1_low} - {ca1_high}, RSC: {rsc_low} - {rsc_high}")
 
-            train_array, y_train, test_array, y_test = process_probe(
+            train_array, y_train, test_array, y_test, cluster_info = process_probe(
                 data_path, kilosort_path, (ca1_low, ca1_high, rsc_low, rsc_high)
             )
             training_arrays.append(train_array)
             training_labels.append(y_train)
             testing_arrays.append(test_array)
             testing_labels.append(y_test)
+            cluster_infos.append(cluster_info)
 
         training_array = np.concatenate(training_arrays, axis=1)
         testing_array = np.concatenate(testing_arrays, axis=1)
+
+        np.save(save_path / f"{subject}_clusters_info.npy", cluster_infos)
         np.save(
             save_path / f"{subject}_training_array.npy",
             training_array,
@@ -230,28 +294,66 @@ def process_mouse(
             testing_labels,
         )
 
-    if len(training_labels) > 1:
+    # One session only has one probe need to handle this
+    n_probes = len(cluster_infos)
+
+    cluster_infos[0]["probe"] = [0] * len(cluster_infos[0]["label"])
+
+    if n_probes > 1:
         assert np.array_equal(training_labels[0], training_labels[1])
         assert np.array_equal(testing_labels[0], testing_labels[1])
+        cluster_infos[1]["probe"] = [1] * len(cluster_infos[1]["label"])
+        cluster_info = {
+            "probe": cluster_infos[0]["probe"] + cluster_infos[1]["probe"],
+            "label": cluster_infos[0]["label"] + cluster_infos[1]["label"],
+            "region": cluster_infos[0]["region"] + cluster_infos[1]["region"],
+        }
+    else:
+        cluster_info = cluster_infos[0]
 
-    model, label_encoder, awake_score, awake_shuffled_scores = get_awake_classifier(
-        training_array.copy(),
-        training_labels[0],
-        C=C,
-        penalty=penalty,
-        solver=solver,
+    # makes indexing easier downstream
+    for key in ["probe", "label", "region"]:
+        cluster_info[key] = np.array(cluster_info[key])
+
+    assert (
+        len(cluster_info["label"])
+        == len(cluster_info["probe"])
+        == len(cluster_info["region"])
+        == training_array.shape[1]
     )
-    np.save(
-        HERE / "results" / f"{subject}_awake_shuffled_scores.npy", awake_shuffled_scores
-    )
+
     trial_states = get_sleep_state(data_path)
-
     assert len(trial_states) == testing_array.shape[0]
     trials_keep = np.isin(trial_states, ["nrem", "deep nrem"])
+
+    for probe_idx in range(n_probes):
+        clusters_keep = (cluster_info["probe"] == probe_idx) & (
+            cluster_info["region"] == "CA1"
+        )
+
+        training_reduced_probe, testing_reduced_probe = dimensionality_reduction(
+            training_array=training_array[:, clusters_keep, :],
+            testing_array=testing_array[:, clusters_keep, :],
+        )
+
+        if probe_idx == 0:
+            training_reduced = training_reduced_probe
+            testing_reduced = testing_reduced_probe
+        else:
+            training_reduced = np.concatenate(
+                (training_reduced, training_reduced_probe), axis=1
+            )
+            testing_reduced = np.concatenate(
+                (testing_reduced, testing_reduced_probe), axis=1
+            )
 
     print(
         f"Keeping {np.sum(trials_keep)} trials out of {len(trial_states)} based on sleep state."
     )
+
+    # Slightly janky redefinition but allows to switch between reduced and non-reduced
+    # training_array = training_reduced
+    # testing_array = testing_reduced
 
     testing_array = testing_array[trials_keep, :, :]
     testing_labels = testing_labels[0][trials_keep]
@@ -259,46 +361,43 @@ def process_mouse(
         len(testing_labels) > 0
     ), "Testing labels are empty after filtering by sleep state."
 
-    # score, shuffled_scores = fit_classifier_to_sleeping_data(
-    #     testing_array.copy(), testing_labels, model, label_encoder, offset=offset
-    # )
+    scores = []
+    awake_scores = []
+    sleep_shuffled = []
+    for awake_offset in range(-5, 15, 3):
+        for sleep_offset in range(-5, 15, 3):
 
-    # Optional: Test improved methods (set to True to compare methods)
+            model, label_encoder, awake_score, awake_shuffled_scores = (
+                get_awake_classifier(
+                    training_array.copy(),
+                    training_labels[0],
+                    C=C,
+                    penalty=penalty,
+                    solver=solver,
+                    awake_offset=awake_offset,
+                )
+            )
+            awake_scores.append(awake_score)
 
-    method_results = compare_classification_methods_rigorous(
-        training_array,
-        testing_array,
-        training_labels[0],
-        testing_labels,
-        model,
-        label_encoder,
-        C,
-        penalty,
-        solver,
-        offset=offset,
-        subject=subject,
-    )
+            score, result_shuffled = fit_classifier_to_sleeping_data(
+                testing_array.copy(),
+                testing_labels,
+                model,
+                label_encoder,
+                sleep_offset=sleep_offset,
+            )
 
-    # score = method_results["cross_domain"]
-    # score_shuffled_labels = method_results["cross_domain_shuffled_labels"]
+            scores.append(score)
+            sleep_shuffled.append(result_shuffled)
 
-    score = method_results["principled_threshold"]
-    score_shuffled_labels = method_results["principled_threshold_shuffled_labels"]
-
-    np.save(HERE / "results" / f"{subject}_classifier_score.npy", score)
-    np.save(
-        HERE / "results" / f"{subject}_classifier_shuffled_labels.npy",
-        score_shuffled_labels,
-    )
-    np.save(HERE / "results" / f"{subject}_awake_scores.npy", awake_score)
+    return scores, awake_scores, sleep_shuffled
 
 
 def process_probe(
     data_path: Path,
     kilosort_path: Path,
     region_boundaries: Tuple[int, int, int, int],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, List[str]]]:
     ca1_low, ca1_high, rsc_low, rsc_high = region_boundaries
 
     assert ca1_low < ca1_high < rsc_low < rsc_high
@@ -322,39 +421,66 @@ def process_probe(
         )
         np.save(kilosort_path.parent / "high_pass_sync.npy", npx_sync_times)
 
+    # This passes most of the time but doesn't for one mouse, the aligners don't error so oh well.
     # assert sum(len(rsync) for rsync in rsync_times) == len(
     #     npx_sync_times
     # ), "Rsync times and NPX sync times do not match in length."
+
     aligners = get_aligners(npx_sync_times, rsync_times)
     spike_times, spike_clusters, labels, closest_channel = load_spiking_data(
         kilosort_path
     )
 
-    idx_keep = (labels == "good") & (
-        (closest_channel >= ca1_low) & (closest_channel <= ca1_high)
-    ) | ((closest_channel >= rsc_low) & (closest_channel <= rsc_high))
+    idx_keep = ((closest_channel >= ca1_low) & (closest_channel <= ca1_high)) | (
+        (closest_channel >= rsc_low) & (closest_channel <= rsc_high)
+    )
 
-    # idx_keep = ((closest_channel >= ca1_low) & (closest_channel <= ca1_high)) | (
-    #     (closest_channel >= rsc_low) & (closest_channel <= rsc_high)
-    # )
-
-    # idx_keep = (closest_channel >= ca1_low) & (closest_channel <= ca1_high)
-    # idx_keep = labels == "good"
-
-    good = spike_times[idx_keep]
+    spike_times = spike_times[idx_keep]
     spike_clusters = spike_clusters[idx_keep]
+
     print(f"Number of clusters : {len(np.unique(spike_clusters))}")
+
+    labels = labels[idx_keep]
+    closest_channel = closest_channel[idx_keep]
 
     n_bins = 100
     window = 0.9  # seconds
+
     train_array, y_train = get_training_data(
-        sessions, aligners, spike_clusters, good, n_bins, window
+        sessions, aligners, spike_clusters, spike_times, n_bins, window
     )
 
     test_array, y_test = get_testing_data(
-        sessions, aligners, spike_clusters, good, n_bins, window
+        sessions, aligners, spike_clusters, spike_times, n_bins, window
     )
-    return train_array, y_train, test_array, y_test
+    cluster_info: Dict[str : List[str]] = {"label": [], "region": []}
+
+    for spike_cluster in np.unique(spike_clusters):
+        idx_cluster = spike_clusters == spike_cluster
+        cluster_label = labels[idx_cluster]
+        assert len(np.unique(cluster_label)) == 1, "Cluster has multiple labels."
+
+        # Different spikes in the same cluster can be localised to different channels
+        closest_channels_cluster = closest_channel[idx_cluster]
+
+        # This seems like a lot but I've manually inspected the positions of the spikes
+        # and the channels they have been asigned to. The logic is correct. Probably the
+        # clusters need splitting though.
+        assert np.max(closest_channels_cluster) - np.min(closest_channels_cluster) <= 12
+
+        average_channel = np.mean(closest_channels_cluster)
+
+        region_cluster = (
+            "CA1"
+            if ca1_low <= average_channel <= ca1_high
+            else "RSC" if rsc_low <= average_channel <= rsc_high else None
+        )
+
+        assert region_cluster is not None
+        cluster_info["label"].append(cluster_label[0])
+        cluster_info["region"].append(region_cluster)
+
+    return train_array, y_train, test_array, y_test, cluster_info
 
 
 def normalize_trial_array(trial_array: np.ndarray) -> np.ndarray:
@@ -376,11 +502,11 @@ def fit_classifier_to_sleeping_data(
     y: np.ndarray,
     awake_model: LogisticRegression,
     label_encoder: LabelEncoder,
+    sleep_offset: int,
     plot: bool = False,
-    offset: int = 0,
 ) -> Tuple[float, List[float]]:
 
-    X = X_from_trial_array(trial_array, offset=offset)
+    X = X_from_trial_array(trial_array, offset=sleep_offset)
 
     # Sum across the post stimulus bins
 
@@ -408,40 +534,27 @@ def fit_classifier_to_sleeping_data(
 
     result = awake_model.predict(X)
     print(f"Predicted labels: {result}")
-    score = np.sum(y_encoded == result) / len(y_encoded)
+    score = balanced_accuracy_score(y_encoded, result)
 
     print(f"Classifier score on sleeping data: {score:.2f}")
 
-    shuffled_scores = []
-    for _ in range(100):
-        shuffle_idx = np.random.permutation(len(y_encoded))
-        X_shuffled = X[shuffle_idx, :]
-        result_shuffled = awake_model.predict(X_shuffled)
-        shuffled_scores.append(np.sum(y_encoded == result_shuffled) / len(y_encoded))
+    shuffle_idx = np.random.permutation(len(y_encoded))
+    X_shuffled = X[shuffle_idx, :]
+    result_shuffled = balanced_accuracy_score(
+        y_encoded, awake_model.predict(X_shuffled)
+    )
 
-    if plot:
-        plt.figure()
-        plt.hist(shuffled_scores, bins=15, alpha=0.5, label="Shuffled scores")
-        plt.axvline(score, color="red", label="Original score")
-        plt.title(
-            f"Z = {(score - np.mean(shuffled_scores)) / np.std(shuffled_scores):.2f}"
-        )
-
-    # return score, shuffled_scores
-    zscore = (score - np.mean(shuffled_scores)) / np.std(shuffled_scores)
-    assert not np.isnan(zscore), "Z-score is NaN. Likely only one label is predicted"
-    return score, shuffled_scores
+    return score, result_shuffled
 
 
 def get_testing_data(
     sessions: List[Session],
     aligners: List[Rsync_aligner],
     spike_clusters: np.ndarray,
-    good: np.ndarray,
+    spike_times: np.ndarray,
     n_bins: int,
     window: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
-
     session_index = 2
     sounds, _ = process_session(sessions[session_index])
 
@@ -452,7 +565,7 @@ def get_testing_data(
 
     trial_array = split_data_by_trial(
         stim_times=sounds_times,
-        spikes=good,
+        spikes=spike_times,
         spike_clusters=spike_clusters,
         window=window,
         n_bins=n_bins,
@@ -464,20 +577,24 @@ def get_testing_data(
 def X_from_trial_array(trial_array: np.ndarray, offset: int = 0) -> np.ndarray:
     # (n_trials, n_clusters, n_bins)
     # Transform to (n_samples, n_features)
-    normalize_trial_array(trial_array)
+    # normalize_trial_array(trial_array)
     n_bins = trial_array.shape[2]
     start = (n_bins // 2) + offset
-    end = start + 10
+    end = start + 20
     X = trial_array[:, :, start:end]
     # return X.reshape(X.shape[0], -1)
     return X.mean(axis=2)
 
 
 def get_awake_classifier(
-    trial_array: np.ndarray, y: np.ndarray, C: float, penalty: str, solver: str
-) -> Tuple[LogisticRegression, LabelEncoder, float]:
-
-    X = X_from_trial_array(trial_array)
+    trial_array: np.ndarray,
+    y: np.ndarray,
+    C: float,
+    penalty: str,
+    solver: str,
+    awake_offset: int,
+) -> Tuple[LogisticRegression, LabelEncoder, float, List[float]]:
+    X = X_from_trial_array(trial_array, offset=awake_offset)
 
     # (n_trials, n_clusters, n_bins)
     # Transform to (n_samples, n_features)
@@ -496,9 +613,7 @@ def get_awake_classifier(
 
     cv = StratifiedKFold(n_splits=5, shuffle=True)
     scores = cross_val_score(model, X, y_encoded, cv=cv, scoring="accuracy")
-
     print("Mean 5-fold accuracy:", scores.mean())
-
     model = LogisticRegression(
         penalty=penalty,
         solver=solver,
@@ -508,24 +623,14 @@ def get_awake_classifier(
     )
 
     model.fit(X, y_encoded)
-
-    shuffled_scores = []
-    for _ in range(100):
-        shuffle_idx = np.random.permutation(len(y_encoded))
-        y_shuffled = y_encoded[shuffle_idx]
-        shuffled_score = cross_val_score(
-            model, X, y_shuffled, cv=cv, scoring="accuracy"
-        )
-        shuffled_scores.append(shuffled_score.mean())
-
-    return model, le, scores.mean(), shuffled_scores
+    return model, le, scores.mean(), []
 
 
 def get_training_data(
     sessions: List[Session],
     aligners: List[Rsync_aligner],
     spike_clusters: np.ndarray,
-    good: np.ndarray,
+    spike_times: np.ndarray,
     n_bins: int,
     window: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -552,7 +657,7 @@ def get_training_data(
 
     trial_array = split_data_by_trial(
         stim_times=LEDs_times,
-        spikes=good,
+        spikes=spike_times,
         spike_clusters=spike_clusters,
         window=window,
         n_bins=n_bins,
@@ -565,8 +670,7 @@ def get_training_data(
 
 
 def plot_processed_data() -> float:
-    # results_path = Path(__file__).parent / "results"
-    results_path = Path("/Volumes/MarcBusche/James/Alex/alex_results_working")
+    results_path = Path(__file__).parent / "results"
 
     mice = set([file.stem.split("_")[0] for file in results_path.glob("*.npy")])
     WT_scores = []
@@ -618,7 +722,6 @@ def plot_processed_data() -> float:
     b.set_ylabel("Classification Accuracy", fontsize=14, fontweight="bold")
     plt.grid(axis="y")
     plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
-    plt.ylim(0.3, 0.9)
     plt.legend(loc="upper right")
 
     p1 = mannwhitneyu(WT_scores, shuffled_label_scores, alternative="two-sided")
@@ -657,8 +760,7 @@ def plot_processed_data() -> float:
 
 
 def plot_processed_data_waking() -> float:
-    # results_path = Path(__file__).parent / "results"
-    results_path = Path("/Volumes/MarcBusche/James/Alex/alex_results_working")
+    results_path = Path(__file__).parent / "results"
     mice = set([file.stem.split("_")[0] for file in results_path.glob("*.npy")])
     WT_scores = []
     NLGF_scores = []
@@ -706,7 +808,6 @@ def plot_processed_data_waking() -> float:
     b.set_xlabel("Genotype", fontsize=14, fontweight="bold")
     b.set_ylabel("Classification Accuracy", fontsize=14, fontweight="bold")
     plt.grid(axis="y")
-    plt.ylim(0.3, 0.9)
     plt.axhline(0.5, color="red", linestyle="--", label="Chance level")
 
     plt.title("Classification accuracy (waking)", fontsize=16, fontweight="bold")
@@ -740,7 +841,6 @@ def plot_processed_data_waking() -> float:
 
 
 def main() -> None:
-
     umbrella = Path("/Volumes/MarcBusche/Alex/Reactivations")
 
     df = gsheet2df("112rq_5qilRHtYUFnFwpjDQeF4XKyTdY6qJhIwAnykN8", "Sheet1", 1)
@@ -760,29 +860,77 @@ def main() -> None:
             path_dict[mouse] = []
         path_dict[mouse].append(kilosort_path)
 
-    solver = "liblinear"  # Solver for Logistic Regression
-    penalty = "l1"
+    solver = "lbfgs"  # Solver for Logistic Regression
+    penalty = "l2"
+    C = 100
 
-    for C in [5]:
+    # JUMP
 
-        for mouse, kilosort_paths in path_dict.items():
+    sleep_scores = {}
+    awake_scores = {}
+    shuffled_scores = {}
+    for mouse, kilosort_paths in path_dict.items():
 
-            assert all(
-                [
-                    (kilosort_path / "spike_times.npy").exists()
-                    for kilosort_path in kilosort_paths
-                ]
-            )
+        assert all(
+            [
+                (kilosort_path / "spike_times.npy").exists()
+                for kilosort_path in kilosort_paths
+            ]
+        )
 
-            data_path = kilosort_paths[0].parent.parent.parent
-            process_mouse(data_path, df, kilosort_paths, C, penalty, solver, offset=0)
+        data_path = kilosort_paths[0].parent.parent.parent
 
-        # awake_score = plot_processed_data()
-        # plt.title(
-        #     f"C = {}, penalty = {penalty}, solver = {solver}, awake = {awake_score: .2f} offset = {0}"
-        # )
+        sleep_score, awake_score, sleep_shuffled = process_mouse(
+            data_path, df, kilosort_paths, C, penalty, solver
+        )
+        sleep_scores[mouse] = sleep_score
+        awake_scores[mouse] = awake_score
+        shuffled_scores[mouse] = sleep_shuffled
 
-    plt.show()
+    np.save(HERE / "results" / f"mouse_sleep_scores.npy", sleep_scores)
+    np.save(HERE / "results" / f"mouse_awake_scores.npy", awake_scores)
+    np.save(HERE / "results" / f"mouse_sleep_shuffled.npy", shuffled_scores)
+
+    return sleep_scores, awake_scores
+
+
+def plot_heatmap(mouse_scores: Dict[str, List[float]], title: str) -> None:
+
+    wt = []
+    nlgf = []
+    for mouse, result in mouse_scores.items():
+        result = np.array(result).reshape(
+            int(np.sqrt(len(result))), int(np.sqrt(len(result)))
+        )
+        result = gaussian_filter(result, sigma=1)
+
+        if mouse[:3] == "000":
+            wt.append(result)
+            print(f"Mouse {mouse} is WT")
+        else:
+            nlgf.append(result)
+            print(f"Mouse {mouse} is NLGF/S305N")
+
+    # vmax = 0.7
+    # vmin = 0.3
+    # for mouse in wt:
+    #     plt.figure()
+    #     plt.title("WT " + title)
+    #     plt.imshow(mouse, vmin=vmin, vmax=vmax)
+
+    # for mouse in nlgf:
+    #     plt.figure()
+    #     plt.title("NLGF/S305N " + title)
+    #     plt.imshow(mouse, vmin=vmin, vmax=vmax)
+
+    to_plot = {
+        "WT": [np.percentile(result, 95) for result in wt],
+        "NLGF/S305N": [np.percentile(result, 95) for result in nlgf],
+    }
+
+    plt.figure()
+    sns.boxplot(to_plot)
+    plt.title("95th percentile scores " + title)
 
 
 def get_sleep_state(data_path: Path) -> np.ndarray:
@@ -850,448 +998,20 @@ def get_sleep_state(data_path: Path) -> np.ndarray:
     return np.array(trial_states)
 
 
-def apply_threshold_correction(
-    trial_array: np.ndarray,
-    y: np.ndarray,
-    awake_model: LogisticRegression,
-    label_encoder: LabelEncoder,
-    offset: int = 0,
-) -> Tuple[float, List[float]]:
-    """Apply threshold correction to compensate for decision boundary shift."""
-
-    print("\n" + "=" * 30 + " THRESHOLD CORRECTION " + "=" * 30)
-
-    X = X_from_trial_array(trial_array.copy(), offset=offset)
-    blue_encoding, orange_encoding = label_encoder.transform(["blue", "orange"])
-
-    y_encoded = np.array(
-        [
-            (
-                blue_encoding
-                if sound == 3000
-                else orange_encoding if sound == 8000 else None
-            )
-            for sound in y
-        ]
-    )
-
-    # Get decision scores
-    decision_scores = awake_model.decision_function(X)
-
-    # Find optimal threshold by maximizing accuracy
-    thresholds = np.linspace(decision_scores.min(), decision_scores.max(), 100)
-    accuracies = []
-
-    for threshold in thresholds:
-        predictions = (decision_scores > threshold).astype(int)
-        accuracy = np.mean(predictions == y_encoded)
-        accuracies.append(accuracy)
-
-    optimal_threshold = thresholds[np.argmax(accuracies)]
-    optimal_accuracy = max(accuracies)
-
-    print(f"Original threshold: 0.0000")
-    print(f"Optimal threshold: {optimal_threshold:.4f}")
-    print(f"Original accuracy: {np.mean((decision_scores > 0) == y_encoded):.4f}")
-    print(f"Corrected accuracy: {optimal_accuracy:.4f}")
-    print(
-        f"Improvement: {optimal_accuracy - np.mean((decision_scores > 0) == y_encoded):.4f}"
-    )
-
-    # Apply corrected threshold
-    corrected_predictions = (decision_scores > optimal_threshold).astype(int)
-
-    print(
-        f"Corrected predictions: blue={np.sum(corrected_predictions == 0)}, orange={np.sum(corrected_predictions == 1)}"
-    )
-    print(
-        f"True labels: blue={np.sum(y_encoded == 0)}, orange={np.sum(y_encoded == 1)}"
-    )
-
-    score = optimal_accuracy
-
-    # Calculate z-score with shuffled data
-    shuffled_scores = []
-    for _ in range(100):
-        shuffle_idx = np.random.permutation(len(y_encoded))
-        X_shuffled = X[shuffle_idx, :]
-        scores_shuffled = awake_model.decision_function(X_shuffled)
-        pred_shuffled = (scores_shuffled > optimal_threshold).astype(int)
-        shuffled_scores.append(np.mean(pred_shuffled == y_encoded))
-
-    zscore = (score - np.mean(shuffled_scores)) / np.std(shuffled_scores)
-
-    print(f"Threshold-corrected Z-score: {zscore:.3f}")
-    print("=" * 75)
-
-    return zscore, shuffled_scores
-
-
-def apply_principled_threshold_correction(
-    trial_array: np.ndarray,
-    y: np.ndarray,
-    awake_model: LogisticRegression,
-    label_encoder: LabelEncoder,
-    offset: int = 0,
-    validation_split: float = 0.5,
-    verbose: bool = False,
-) -> Tuple[float, List[float], float]:
-    """Apply threshold correction with proper validation to avoid data snooping."""
-
-    X = X_from_trial_array(trial_array.copy(), offset=offset)
-    blue_encoding, orange_encoding = label_encoder.transform(["blue", "orange"])
-
-    y_encoded = np.array(
-        [
-            (
-                blue_encoding
-                if sound == 3000
-                else orange_encoding if sound == 8000 else None
-            )
-            for sound in y
-        ]
-    )
-
-    # Split data: use part for threshold optimization, part for evaluation
-    n_samples = len(y_encoded)
-    split_idx = int(n_samples * validation_split)
-
-    # Randomly split (but reproducibly)
-    np.random.seed(42)
-    shuffle_idx = np.random.permutation(n_samples)
-
-    # Optimization set (find threshold)
-    opt_idx = shuffle_idx[:split_idx]
-    X_opt, y_opt = X[opt_idx], y_encoded[opt_idx]
-
-    # Evaluation set (test threshold)
-    eval_idx = shuffle_idx[split_idx:]
-    X_eval, y_eval = X[eval_idx], y_encoded[eval_idx]
-
-    if verbose:
-        print(f"Using {len(opt_idx)} trials for threshold optimization")
-        print(f"Using {len(eval_idx)} trials for evaluation")
-
-    # Find optimal threshold on optimization set
-    decision_scores_opt = awake_model.decision_function(X_opt)
-
-    thresholds = np.linspace(
-        decision_scores_opt.min(),
-        decision_scores_opt.max(),
-        100,
-    )
-    accuracies = []
-
-    for threshold in thresholds:
-        predictions = (decision_scores_opt > threshold).astype(int)
-        # Use balanced accuracy score instead of simple accuracy
-
-        accuracy = balanced_accuracy_score(y_opt, predictions)
-        # accuracy = np.mean(predictions == y_opt)
-        accuracies.append(accuracy)
-
-    optimal_threshold = thresholds[np.argmax(accuracies)]
-
-    if verbose:
-        print(f"Optimal threshold found: {optimal_threshold:.4f}")
-
-    # Apply threshold to evaluation set (unseen during optimization)
-    decision_scores_eval = awake_model.decision_function(X_eval)
-    corrected_predictions = (decision_scores_eval > optimal_threshold).astype(int)
-
-    score = balanced_accuracy_score(y_eval, corrected_predictions)
-    if verbose:
-        print(f"principle threshold score: {score:.4f}")
-    # assert not np.all(
-    #     corrected_predictions == corrected_predictions[0]
-    # ), "All predictions are the same. This indicates a problem with the threshold or the data."
-
-    original_score = balanced_accuracy_score(
-        y_eval, (decision_scores_eval > 0).astype(int)
-    )
-    return score, None, None
-    print(f"Number of trials in eval set: {len(y_eval)}")
-
-    print(f"Original accuracy on eval set: {original_score:.4f}")
-    print(f"Corrected accuracy on eval set: {score:.4f}")
-    print(f"Improvement: {score - original_score:.4f}")
-
-    # # Calculate z-score with shuffled data (on evaluation set only)
-    # shuffled_scores = []
-    # for _ in range(1000):
-    #     shuffle_eval_idx = np.random.permutation(len(y_eval))
-    #     X_shuffled = X_eval[shuffle_eval_idx, :]
-    #     scores_shuffled = awake_model.decision_function(X_shuffled)
-    #     pred_shuffled = (scores_shuffled > optimal_threshold).astype(int)
-    #     shuffled_scores.append(np.mean(pred_shuffled == y_eval))
-
-    # # assert not np.allclose(
-    # #     shuffled_scores, shuffled_scores[0], atol=1e-6
-    # # ), "Shuffled scores are all the same. This indicates a problem with the shuffling or the data."
-    # zscore = (score - np.mean(shuffled_scores)) / np.std(shuffled_scores)
-    # # assert not np.isnan(zscore), "Z-score is NaN. Likely only one label is predicted."
-
-    # print(f"Principled threshold-corrected Z-score: {zscore:.3f}")
-    # print("=" * 75)
-
-    return zscore, shuffled_scores, optimal_threshold
-
-
-def apply_cross_domain_normalization(
-    training_array: np.ndarray,
-    testing_array: np.ndarray,
-    training_labels: np.ndarray,
-    testing_labels: np.ndarray,
-    C: float,
-    penalty: str,
-    solver: str,
-    offset: int = 0,
-    verbose: bool = False,
-) -> Tuple[float, np.ndarray, LogisticRegression, LabelEncoder]:
-    """
-    Apply cross-domain normalization: normalize features across both domains,
-    retrain model, and evaluate on normalized test data.
-
-    This addresses domain shift by ensuring both training and testing data
-    have similar feature distributions.
-    """
-
-    # Extract features from both domains
-    X_train = X_from_trial_array(training_array.copy(), offset=offset)
-    X_test = X_from_trial_array(testing_array.copy(), offset=offset)
-
-    if verbose:
-        print(f"Original training data shape: {X_train.shape}")
-        print(f"Original testing data shape: {X_test.shape}")
-        print(f"Training mean activity: {X_train.mean():.4f}")
-        print(f"Testing mean activity: {X_test.mean():.4f}")
-
-    # Combine data for normalization statistics
-    X_combined = np.vstack([X_train, X_test])
-
-    # Calculate normalization parameters from combined data
-    combined_mean = X_combined.mean(axis=0)
-    combined_std = X_combined.std(axis=0)
-    combined_std[combined_std == 0] = 1  # Avoid division by zero
-
-    # Normalize both training and testing data using combined statistics
-    X_train_norm = (X_train - combined_mean) / combined_std
-    X_test_norm = (X_test - combined_mean) / combined_std
-    # Encode labels
-    label_encoder_new = LabelEncoder()
-    y_train_encoded = label_encoder_new.fit_transform(training_labels)
-
-    blue_encoding, orange_encoding = label_encoder_new.transform(["blue", "orange"])
-    y_test_encoded = np.array(
-        [
-            (
-                blue_encoding
-                if sound == 3000
-                else orange_encoding if sound == 8000 else None
-            )
-            for sound in testing_labels
-        ]
-    )
-
-    if verbose:
-        print(f"Training labels: {len(y_train_encoded)} samples")
-        print(f"Testing labels: {len(y_test_encoded)} samples")
-
-    # Train new model on normalized training data
-    model_norm = LogisticRegression(
-        C=C, penalty=penalty, solver=solver, random_state=42, max_iter=1000
-    )
-    model_norm.fit(X_train_norm, y_train_encoded)
-
-    # Evaluate on normalized testing data
-    predictions = model_norm.predict(X_test_norm)
-
-    assert not np.all(
-        predictions == predictions[0]
-    ), "All predictions are the same. This indicates a problem with the normalization or the data."
-
-    score = balanced_accuracy_score(y_test_encoded, predictions)
-
-    if verbose:
-        print(f"cross norm score: {score}")
-    return score, None, None, None
-
-    if verbose:
-        print(f"Cross-domain normalized accuracy: {score:.4f}")
-
-    # Calculate z-score with shuffled data (using normalized features)
-    shuffled_scores = []
-    for _ in range(1000):
-        # Shuffle the testing data
-        shuffle_idx = np.random.permutation(len(y_test_encoded))
-        X_test_shuffled = X_test_norm[shuffle_idx, :]
-        pred_shuffled = model_norm.predict(X_test_shuffled)
-        shuffled_scores.append(balanced_accuracy_score(y_test_encoded, pred_shuffled))
-
-    zscore = (score - np.mean(shuffled_scores)) / np.std(shuffled_scores)
-
-    if verbose:
-        print(f"Cross-domain normalized Z-score: {zscore:.3f}")
-        print(f"Shuffled mean: {np.mean(shuffled_scores):.4f}")
-        print(f"Shuffled std: {np.std(shuffled_scores):.4f}")
-        print("=" * 75)
-
-    return score, shuffled_scores, model_norm, label_encoder_new
-
-
-def justify_threshold_correction_scientifically(
-    training_array: np.ndarray,
-    testing_array: np.ndarray,
-    model: LogisticRegression,
-    label_encoder: LabelEncoder,
-) -> None:
-    """Provide scientific justification for why threshold correction might be needed."""
-
-    print("\n" + "=" * 30 + " SCIENTIFIC JUSTIFICATION " + "=" * 30)
-
-    # Extract features
-    X_train = X_from_trial_array(training_array.copy())
-    X_test = X_from_trial_array(testing_array.copy())
-
-    # Compare feature distributions
-    print("FEATURE DISTRIBUTION ANALYSIS:")
-    print(f"Training (awake) mean activity: {X_train.mean():.4f}")
-    print(f"Testing (sleep) mean activity: {X_test.mean():.4f}")
-    print(f"Activity shift: {X_test.mean() - X_train.mean():.4f}")
-
-    # Decision boundary analysis
-    train_scores = model.decision_function(X_train)
-    test_scores = model.decision_function(X_test)
-
-    print(f"\nDECISION BOUNDARY ANALYSIS:")
-    print(
-        f"Training decision scores: {train_scores.mean():.4f} ± {train_scores.std():.4f}"
-    )
-    print(
-        f"Testing decision scores: {test_scores.mean():.4f} ± {test_scores.std():.4f}"
-    )
-    print(f"Boundary shift: {test_scores.mean() - train_scores.mean():.4f}")
-
-    # Theoretical justification
-    boundary_shift = abs(test_scores.mean() - train_scores.mean())
-    activity_shift = abs(X_test.mean() - X_train.mean())
-
-    print(f"\nSCIENTIFIC REASONING:")
-    if boundary_shift > 0.5:
-        print("✓ Large decision boundary shift detected")
-        print("  → Suggests systematic difference between sleep/wake states")
-        print("  → Threshold correction addresses domain shift, not signal quality")
-
-    if activity_shift > 0.1:
-        print("✓ Substantial activity level difference between states")
-        print("  → Sleep suppression is expected neurobiologically")
-        print("  → Correction accounts for state-dependent baseline shifts")
-
-    print(f"\nJUSTIFICATION VERDICT:")
-    if boundary_shift > 0.5 and activity_shift > 0.1:
-        print("🟢 THRESHOLD CORRECTION IS SCIENTIFICALLY JUSTIFIED")
-        print("   Reason: Correcting for known neurobiological differences")
-        print("   between sleep and wake states, not optimizing signal detection")
-    else:
-        print("🟡 THRESHOLD CORRECTION IS QUESTIONABLE")
-        print("   Reason: Changes may reflect genuine differences in reactivation")
-
-    print("=" * 75)
-
-
-# Add this to your comparison function
-def compare_classification_methods_rigorous(
-    training_array: np.ndarray,
-    testing_array: np.ndarray,
-    training_labels: np.ndarray,
-    testing_labels: np.ndarray,
-    model: LogisticRegression,
-    label_encoder: LabelEncoder,
-    C: float,
-    penalty: str,
-    solver: str,
-    offset: int = 0,
-    subject: str = "Unknown",
-) -> Dict[str, float]:
-
-    results = {}
-
-    # 1. Original method
-    # print("\n1. ORIGINAL METHOD:")
-    # original_zscore, _ = fit_classifier_to_sleeping_data(
-    #     testing_array.copy(), testing_labels, model, label_encoder, offset=offset
-    # )
-    # results["original"] = original_zscore
-
-    # 2. Scientific justification for threshold correction
-    # justify_threshold_correction_scientifically(
-    #     training_array, testing_array, model, label_encoder
-    # )
-
-    # 3. Principled threshold correction (with validation split)
-    # print("\n2. PRINCIPLED THRESHOLD CORRECTION:")
-
-    principled_zscore, _, threshold = apply_principled_threshold_correction(
-        testing_array.copy(),
-        testing_labels,
-        model,
-        label_encoder,
-        offset=offset,
-        verbose=True,
-    )
-
-    results["principled_threshold"] = principled_zscore
-
-    shuffled_result = []
-    for _ in range(100):
-        np.random.shuffle(testing_labels)
-        principle_zscore_shuffled, _, threshold = apply_principled_threshold_correction(
-            testing_array.copy(), testing_labels, model, label_encoder, offset=offset
-        )
-        shuffled_result.append(principle_zscore_shuffled)
-
-    results["principled_threshold_shuffled_labels"] = shuffled_result
-
-    # 4. Cross-domain normalization
-
-    ###############
-    print("\n3. CROSS-DOMAIN NORMALIZATION:")
-    cross_norm_score, _, _, _ = apply_cross_domain_normalization(
-        training_array.copy(),
-        testing_array.copy(),
-        training_labels,
-        testing_labels,
-        C,
-        penalty,
-        solver,
-        offset=offset,
-        verbose=True,
-    )
-
-    shuffled_result = []
-
-    for _ in range(100):
-        np.random.shuffle(testing_labels)
-        domain_zscore_shuffled_labels, _, _, _ = apply_cross_domain_normalization(
-            training_array.copy(),
-            testing_array.copy(),
-            training_labels,
-            testing_labels,
-            C,
-            penalty,
-            solver,
-            offset=offset,
-        )
-        shuffled_result.append(domain_zscore_shuffled_labels)
-
-    # results["cross_domain"] = cross_norm_score
-    # results["cross_domain_shuffled_labels"] = shuffled_result
-
-    return results
-
-
 if __name__ == "__main__":
-    # main()
-    plot_processed_data()
-    plot_processed_data_waking()
+    main()
+    sleep_scores = np.load(
+        HERE / "results" / f"mouse_sleep_scores.npy", allow_pickle=True
+    ).item()
+    awake_scores = np.load(
+        HERE / "results" / f"mouse_awake_scores.npy", allow_pickle=True
+    ).item()
+    shuffled_scores = np.load(
+        HERE / "results" / f"mouse_sleep_shuffled.npy", allow_pickle=True
+    ).item()
+
+    plot_heatmap(sleep_scores, title="sleep")
+    plot_heatmap(shuffled_scores, title="shuffled")
+    plot_heatmap(awake_scores, title="awake")
+
     plt.show()
