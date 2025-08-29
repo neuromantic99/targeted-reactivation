@@ -216,10 +216,6 @@ def dimensionality_reduction(training_array, testing_array):
     testing_array_reduced = reduced[:, n_training_samples:].reshape(
         *testing_array.shape
     )
-
-    testing_array_reduced = testing_array_reduced[:20]
-    training_array_reduced = training_array_reduced[:20]
-
     return np.swapaxes(training_array_reduced, 0, 1), np.swapaxes(
         testing_array_reduced, 0, 1
     )
@@ -327,8 +323,9 @@ def process_mouse(
     trials_keep = np.isin(trial_states, ["nrem", "deep nrem"])
 
     for probe_idx in range(n_probes):
+
         clusters_keep = (cluster_info["probe"] == probe_idx) & (
-            cluster_info["region"] == "CA1"
+            (cluster_info["region"] == "RSC") | (cluster_info["region"] == "CA1")
         )
 
         training_reduced_probe, testing_reduced_probe = dimensionality_reduction(
@@ -355,6 +352,9 @@ def process_mouse(
     # training_array = training_reduced
     # testing_array = testing_reduced
 
+    # training_array = training_array[:, cluster_info["region"] == "RSC", :]
+    # testing_array = testing_array[:, cluster_info["region"] == "RSC", :]
+
     testing_array = testing_array[trials_keep, :, :]
     testing_labels = testing_labels[0][trials_keep]
     assert (
@@ -366,16 +366,18 @@ def process_mouse(
     sleep_shuffled = []
     for awake_offset in range(-5, 15, 3):
         for sleep_offset in range(-5, 15, 3):
-
-            model, label_encoder, awake_score, awake_shuffled_scores = (
-                get_awake_classifier(
-                    training_array.copy(),
-                    training_labels[0],
-                    C=C,
-                    penalty=penalty,
-                    solver=solver,
-                    awake_offset=awake_offset,
-                )
+            (
+                model,
+                label_encoder,
+                awake_score,
+                awake_shuffled_scores,
+            ) = get_awake_classifier(
+                training_array.copy(),
+                training_labels[0],
+                C=C,
+                penalty=penalty,
+                solver=solver,
+                awake_offset=awake_offset,
             )
             awake_scores.append(awake_score)
 
@@ -505,7 +507,6 @@ def fit_classifier_to_sleeping_data(
     sleep_offset: int,
     plot: bool = False,
 ) -> Tuple[float, List[float]]:
-
     X = X_from_trial_array(trial_array, offset=sleep_offset)
 
     # Sum across the post stimulus bins
@@ -538,11 +539,13 @@ def fit_classifier_to_sleeping_data(
 
     print(f"Classifier score on sleeping data: {score:.2f}")
 
-    shuffle_idx = np.random.permutation(len(y_encoded))
-    X_shuffled = X[shuffle_idx, :]
-    result_shuffled = balanced_accuracy_score(
-        y_encoded, awake_model.predict(X_shuffled)
-    )
+    result_shuffled = []
+    for _ in range(100):
+        shuffle_idx = np.random.permutation(len(y_encoded))
+        X_shuffled = X[shuffle_idx, :]
+        result_shuffled.append(
+            balanced_accuracy_score(y_encoded, awake_model.predict(X_shuffled))
+        )
 
     return score, result_shuffled
 
@@ -870,7 +873,6 @@ def main() -> None:
     awake_scores = {}
     shuffled_scores = {}
     for mouse, kilosort_paths in path_dict.items():
-
         assert all(
             [
                 (kilosort_path / "spike_times.npy").exists()
@@ -894,8 +896,91 @@ def main() -> None:
     return sleep_scores, awake_scores
 
 
-def plot_heatmap(mouse_scores: Dict[str, List[float]], title: str) -> None:
+def plot_boxplots(
+    awake: Dict[str, List[float]],
+    sleep: Dict[str, List[float]],
+    shuffled: Dict[str, List[float]],
+) -> None:
+    wt_wake = []
+    nlgf_wake = []
 
+    wt_sleep = []
+    nlgf_sleep = []
+
+    wt_shuffled = []
+    nlgf_shuffled = []
+
+    for mouse in awake.keys():
+
+        ##############
+        result = awake[mouse]
+        result = np.array(result).reshape(
+            int(np.sqrt(len(result))), int(np.sqrt(len(result)))
+        )
+        result = gaussian_filter(result, sigma=1)
+
+        if mouse[:3] == "000":
+            wt_wake.append(result)
+        else:
+            nlgf_wake.append(result)
+
+        ###################
+        result = sleep[mouse]
+        result = np.array(result).reshape(
+            int(np.sqrt(len(result))), int(np.sqrt(len(result)))
+        )
+        result = gaussian_filter(result, sigma=1)
+
+        if mouse[:3] == "000":
+            wt_sleep.append(result)
+        else:
+            nlgf_sleep.append(result)
+
+        ######################
+        result = shuffled[mouse]
+
+        result = np.array(result).reshape(
+            int(np.sqrt(len(result))), int(np.sqrt(len(result))), len(result[0])
+        )
+
+        for shuffle in range(result.shape[2]):
+            result_shuffle = gaussian_filter(result[:, :, shuffle], sigma=1)
+
+            if mouse[:3] == "000":
+                wt_shuffled.append(result_shuffle)
+            else:
+                nlgf_shuffled.append(result_shuffle)
+
+    to_plot = {
+        "WT": [np.percentile(result, 95) for result in wt_wake],
+        "NLGF/S305N": [np.percentile(result, 95) for result in nlgf_wake],
+    }
+
+    sns.boxplot(to_plot)
+    plt.title("95th percentile scores waking")
+
+    to_plot = {
+        "WT": [np.percentile(result, 95) for result in wt_sleep],
+        "WT_Shuffled": [np.percentile(result, 95) for result in wt_shuffled],
+        "NLGF/S305N": [np.percentile(result, 95) for result in nlgf_sleep],
+        "NLGF/S305N_Shuffled": [np.percentile(result, 95) for result in nlgf_shuffled],
+    }
+    t_wt = ttest_ind(
+        [np.percentile(result, 95) for result in wt_sleep],
+        [np.percentile(result, 95) for result in wt_shuffled],
+    )
+    t_nlgf = ttest_ind(
+        [np.percentile(result, 95) for result in nlgf_sleep],
+        [np.percentile(result, 95) for result in nlgf_shuffled],
+    )
+
+    plt.figure()
+    sns.boxplot(to_plot, showfliers=False)
+    sns.stripplot(to_plot)
+    plt.title(f"WT p={t_wt.pvalue:.3f}, NLGF/S305N p={t_nlgf.pvalue:.3f}")
+
+
+def plot_heatmap(mouse_scores: Dict[str, List[float]], title: str) -> None:
     wt = []
     nlgf = []
     for mouse, result in mouse_scores.items():
@@ -911,17 +996,17 @@ def plot_heatmap(mouse_scores: Dict[str, List[float]], title: str) -> None:
             nlgf.append(result)
             print(f"Mouse {mouse} is NLGF/S305N")
 
-    # vmax = 0.7
-    # vmin = 0.3
-    # for mouse in wt:
-    #     plt.figure()
-    #     plt.title("WT " + title)
-    #     plt.imshow(mouse, vmin=vmin, vmax=vmax)
+    vmax = 0.7
+    vmin = 0.3
+    for mouse in wt:
+        plt.figure()
+        plt.title("WT " + title)
+        plt.imshow(mouse, vmin=vmin, vmax=vmax)
 
-    # for mouse in nlgf:
-    #     plt.figure()
-    #     plt.title("NLGF/S305N " + title)
-    #     plt.imshow(mouse, vmin=vmin, vmax=vmax)
+    for mouse in nlgf:
+        plt.figure()
+        plt.title("NLGF/S305N " + title)
+        plt.imshow(mouse, vmin=vmin, vmax=vmax)
 
     to_plot = {
         "WT": [np.percentile(result, 95) for result in wt],
@@ -930,11 +1015,11 @@ def plot_heatmap(mouse_scores: Dict[str, List[float]], title: str) -> None:
 
     plt.figure()
     sns.boxplot(to_plot)
+    plt.ylim(0.45, 0.7)
     plt.title("95th percentile scores " + title)
 
 
 def get_sleep_state(data_path: Path) -> np.ndarray:
-
     num_to_state = {0.5: "nrem", 0: "deep nrem", 1: "rem", 2: "awake", 4: "movement"}
 
     _, _, pycontrol_files = get_data_paths(data_path)
@@ -1010,8 +1095,9 @@ if __name__ == "__main__":
         HERE / "results" / f"mouse_sleep_shuffled.npy", allow_pickle=True
     ).item()
 
-    plot_heatmap(sleep_scores, title="sleep")
-    plot_heatmap(shuffled_scores, title="shuffled")
-    plot_heatmap(awake_scores, title="awake")
+    # plot_heatmap(sleep_scores, title="sleep")
+    # plot_heatmap(shuffled_scores, title="shuffled")
+    # plot_heatmap(awake_scores, title="awake")
+    plot_boxplots(awake_scores, sleep_scores, shuffled_scores)
 
     plt.show()
