@@ -352,8 +352,8 @@ def process_mouse(
     # training_array = training_reduced
     # testing_array = testing_reduced
 
-    # training_array = training_array[:, cluster_info["region"] == "RSC", :]
-    # testing_array = testing_array[:, cluster_info["region"] == "RSC", :]
+    training_array = training_array[:, cluster_info["region"] == "CA1", :]
+    testing_array = testing_array[:, cluster_info["region"] == "CA1", :]
 
     testing_array = testing_array[trials_keep, :, :]
     testing_labels = testing_labels[0][trials_keep]
