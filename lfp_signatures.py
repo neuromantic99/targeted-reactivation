@@ -24,15 +24,15 @@ from gsheets_importer import gsheet2df
 from models import RipplesCache, SlowOscillationCache, SpindleCache
 
 from data_import import Session
-from main import HERE, get_aligners
 
 import matplotlib.pyplot as plt
 
-from utils import get_data_paths
+from utils import get_data_paths, get_aligners
 from collections import namedtuple
 from utils import save_figure
 
 
+HERE = Path(__file__).parent
 FIGURE_PATH = HERE / "plots" / "lfp_signatures"
 
 WT_COLOR = "#1f77b4"
@@ -131,10 +131,9 @@ def get_lfp_signatures(
 
 def get_sync(lfp_path: Path, mouse: str, imec: str) -> np.ndarray:
     raw_sync_folder = Path(LOCAL_SSD / "lfp_syncs")
-    if (raw_sync_folder / f"npx_sync_times_{mouse}_{imec}.npy").exists():
-        return np.load(raw_sync_folder / f"npx_sync_times_{mouse}_{imec}.npy")
-
     raw_sync_path = raw_sync_folder / f"raw_sync_{mouse}_{imec}.npy"
+    if (raw_sync_path).exists():
+        return np.load(raw_sync_path)
 
     if raw_sync_path.exists():
         raw_sync = np.load(raw_sync_path)
@@ -157,13 +156,6 @@ def get_ca1_rsc_channels(lfp_file: Path, df: pd.DataFrame) -> tuple[int, int, in
                 int(row["RSC_High"]),
             )
     raise ValueError(f"Could not find channels for {lfp_file.name} in dataframe")
-
-
-# lfp_files = [
-#     Path(
-#         "/Volumes/MarcBusche/Alex/Reactivations/2025-05-20/11150/20250520_g0/20250520_g0_imec0/20250520_g0_t0.imec0.lf.bin"
-#     )
-# ]
 
 
 def main() -> None:
@@ -822,5 +814,5 @@ def get_coupling_results():
 
 
 if __name__ == "__main__":
-    # get_coupling_results()
-    plot_spindle_results()
+    get_coupling_results()
+    # plot_spindle_results()

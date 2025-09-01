@@ -14,7 +14,13 @@ from scipy.stats import zscore
 from gsheets_importer import gsheet2df
 from lfp_signatures import get_ca1_rsc_channels
 from rsync import Rsync_aligner
-from utils import get_aligners, get_data_paths, process_session, save_figure
+from utils import (
+    build_path_dict,
+    get_aligners,
+    get_data_paths,
+    process_session,
+    save_figure,
+)
 from sklearn.preprocessing import minmax_scale
 
 from scipy.stats import kruskal, mannwhitneyu
@@ -74,18 +80,18 @@ def load_spiking_data(
         _, closest_channel = tree.query(spike_positions, k=1)
         np.save(kilosort_path / "closest_channel.npy", closest_channel)
 
-    # Useful debugging plot, looks correct, might want to look at it again
-    for g in np.unique(spike_clusters):
-        indy = spike_clusters == g
-        pos = spike_positions[indy]
-        channy = closest_channel[indy]
-        cd = np.max(channy) - np.min(channy)
-        if cd > 12:
-            plt.plot(
-                channel_positions[channy][:, 0], channel_positions[channy][:, 1], "."
-            )
-            plt.plot(pos[:, 0], pos[:, 1], ".")
-            1 / 0
+    # # Useful debugging plot, looks correct, might want to look at it again
+    # for g in np.unique(spike_clusters):
+    #     indy = spike_clusters == g
+    #     pos = spike_positions[indy]
+    #     channy = closest_channel[indy]
+    #     cd = np.max(channy) - np.min(channy)
+    #     if cd > 12:
+    #         plt.plot(
+    #             channel_positions[channy][:, 0], channel_positions[channy][:, 1], "."
+    #         )
+    #         plt.plot(pos[:, 0], pos[:, 1], ".")
+    #         1 / 0
 
     return spike_times, spike_clusters, label_array, closest_channel
 
@@ -136,47 +142,6 @@ def split_data_by_trial(
         result.append(trial_result)
 
     return np.array(result)
-
-
-def split_data_by_trial_old(
-    stim_times: np.ndarray,
-    spikes: np.ndarray,
-    spike_clusters: np.ndarray,
-    window: float,
-    n_bins: int,
-    sampling_rate: int = 30_000,
-) -> np.ndarray:
-    """Split the spike data into trials based on stimulus times.
-
-    Returns: np.ndarray (n_trials, n_clusters, n_bins)
-    """
-
-    result = []
-    bin_edges = np.linspace(-window * sampling_rate, window * sampling_rate, n_bins)
-
-    for onset in stim_times:
-        start = onset - window * sampling_rate
-        end = onset + window * sampling_rate
-        idx_trial = (spikes >= start) & (spikes <= end)
-        trial_spikes = spikes[idx_trial]
-        trial_clusters = spike_clusters[idx_trial]
-
-        trial_result = np.zeros((max(spike_clusters) + 1, n_bins - 1))
-
-        for cluster in np.unique(trial_clusters):
-            cluster_spikes = trial_spikes[trial_clusters == cluster]
-            binned = np.histogram(cluster_spikes - onset, bins=bin_edges)[0]
-            trial_result[cluster, :] = binned
-
-        result.append(trial_result)
-
-    result = np.array(result)
-
-    # The result array spans from 0 to max(spike_clusters) but lots of these might not be actual clusters
-    # if spike_clusters has been filtered. So return the actual clusters.
-    actual_clusters = np.unique(spike_clusters)
-
-    return result[:, actual_clusters, :]
 
 
 def reduce_array_resolution(arr: np.ndarray, n: int) -> np.ndarray:
@@ -352,8 +317,8 @@ def process_mouse(
     # training_array = training_reduced
     # testing_array = testing_reduced
 
-    training_array = training_array[:, cluster_info["region"] == "CA1", :]
-    testing_array = testing_array[:, cluster_info["region"] == "CA1", :]
+    training_array = training_array[:, cluster_info["region"] == "RSC", :]
+    testing_array = testing_array[:, cluster_info["region"] == "RSC", :]
 
     testing_array = testing_array[trials_keep, :, :]
     testing_labels = testing_labels[0][trials_keep]
@@ -399,7 +364,18 @@ def process_probe(
     data_path: Path,
     kilosort_path: Path,
     region_boundaries: Tuple[int, int, int, int],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, List[str]]]:
+    bin_data: bool = True,
+) -> (
+    # Worst return type of all time
+    Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, List[str]]]
+    | Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[Rsync_aligner]]
+):
+    """If bin_data is set to true, you'll get a trial by trial array of binned data. Otherwise you'll get the spike times etc
+    and the aligners.
+
+    I did this to hijack this function for spontaneous_reactivation. Should be refactored but oh well
+
+    """
     ca1_low, ca1_high, rsc_low, rsc_high = region_boundaries
 
     assert ca1_low < ca1_high < rsc_low < rsc_high
@@ -429,6 +405,7 @@ def process_probe(
     # ), "Rsync times and NPX sync times do not match in length."
 
     aligners = get_aligners(npx_sync_times, rsync_times)
+
     spike_times, spike_clusters, labels, closest_channel = load_spiking_data(
         kilosort_path
     )
@@ -444,6 +421,9 @@ def process_probe(
 
     labels = labels[idx_keep]
     closest_channel = closest_channel[idx_keep]
+
+    if not bin_data:
+        return spike_times, spike_clusters, labels, closest_channel, aligners
 
     n_bins = 100
     window = 0.9  # seconds
@@ -466,8 +446,8 @@ def process_probe(
         closest_channels_cluster = closest_channel[idx_cluster]
 
         # This seems like a lot but I've manually inspected the positions of the spikes
-        # and the channels they have been asigned to. The logic is correct. Probably the
-        # clusters need splitting though.
+        # and the channels they have been asigned to. The logic is correct.
+        # It could be drift or the clusters need splitting
         assert np.max(closest_channels_cluster) - np.min(closest_channels_cluster) <= 12
 
         average_channel = np.mean(closest_channels_cluster)
@@ -844,24 +824,8 @@ def plot_processed_data_waking() -> float:
 
 
 def main() -> None:
-    umbrella = Path("/Volumes/MarcBusche/Alex/Reactivations")
-
-    df = gsheet2df("112rq_5qilRHtYUFnFwpjDQeF4XKyTdY6qJhIwAnykN8", "Sheet1", 1)
-
-    kilosort_paths = list(umbrella.rglob("*/kilosort4"))
-    path_dict: Dict[str, List[Path]] = {}
-    if len(kilosort_paths) == 0:
-        raise FileNotFoundError(
-            "No kilosort paths found. Please check the path to the data."
-        )
-    for kilosort_path in kilosort_paths:
-        mouse = kilosort_path.parts[-4]
-        # This mouse has bad data, see email
-        if mouse in ["11153"]:
-            continue
-        if mouse not in path_dict:
-            path_dict[mouse] = []
-        path_dict[mouse].append(kilosort_path)
+    path_dict = build_path_dict()
+    paths_df = gsheet2df("112rq_5qilRHtYUFnFwpjDQeF4XKyTdY6qJhIwAnykN8", "Sheet1", 1)
 
     solver = "lbfgs"  # Solver for Logistic Regression
     penalty = "l2"
@@ -883,8 +847,9 @@ def main() -> None:
         data_path = kilosort_paths[0].parent.parent.parent
 
         sleep_score, awake_score, sleep_shuffled = process_mouse(
-            data_path, df, kilosort_paths, C, penalty, solver
+            data_path, paths_df, kilosort_paths, C, penalty, solver
         )
+
         sleep_scores[mouse] = sleep_score
         awake_scores[mouse] = awake_score
         shuffled_scores[mouse] = sleep_shuffled
