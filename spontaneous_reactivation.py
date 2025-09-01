@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from typing import Tuple
 
 import numpy as np
 import seaborn as sns
@@ -135,7 +136,7 @@ def offline_reactivation(
 
     # outer product for each component b with itself
     # shape (components, cells, cells)
-    projection_matrices = contract("kb,jb->bkj", ensemble_matrix, ensemble_matrix)
+    projection_matrices = np.einsum("kb,jb->bkj", ensemble_matrix, ensemble_matrix)
     assert projection_matrices.shape == (
         n_components,
         n_cells,
@@ -146,7 +147,7 @@ def offline_reactivation(
     for b in range(projection_matrices.shape[0]):
         np.fill_diagonal(projection_matrices[b], 0)
 
-    reactivation_strength = contract(
+    reactivation_strength = np.einsum(
         "ik,bkj,ji->bi",
         offline_activity_matrix.T,  # Zi.T
         projection_matrices,  # Pb
@@ -176,11 +177,17 @@ def main() -> None:
 
         data_path = kilosort_paths[0].parent.parent.parent
         _, frame_trigger_times, pycontrol_files = get_data_paths(data_path)
-        frame_triggers = np.load(frame_trigger_times[1])
-        start_time_pycontrol, end_time_pycontrol = frame_triggers[0], frame_triggers[-1]
+        conditioning_frames = np.load(frame_trigger_times[0])
+        pycontrol_conditioning_time_edges = (
+            conditioning_frames[0],
+            conditioning_frames[-1],
+        )
+        resting_frames = np.load(frame_trigger_times[-1])
+        pycontrol_resting_time_edges = (resting_frames[0], resting_frames[-1])
+
         sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
 
-        redo = True
+        redo = False
 
         for kilosort_path in kilosort_paths:
             region_boundaries = get_ca1_rsc_channels(kilosort_path, paths_df)
@@ -205,10 +212,11 @@ def main() -> None:
                     sessions=sessions,
                     kilosort_path=kilosort_path,
                     region_boundaries=region_boundaries,
-                    start_time_pycontrol=start_time_pycontrol,
-                    end_time_pycontrol=end_time_pycontrol,
+                    pycontrol_conditioning_time_edges=pycontrol_conditioning_time_edges,
+                    pycontrol_resting_time_edges=pycontrol_resting_time_edges,
                 )
 
+            continue
             with open(
                 HERE / "results" / "ripples" / f"{mouse}_imec_{imec[-1]}.json"
             ) as f:
@@ -245,7 +253,7 @@ def main() -> None:
                 lfp_sync, [session.times["rsync"] for session in sessions]
             )[1]
             first_sample = lfp_pycontrol_aligner.B_to_A(
-                np.array([start_time_pycontrol])
+                np.array([pycontrol_resting_time_edges[0]])
             )[0]
 
             ripple_times_spikes = np.array(
@@ -285,13 +293,8 @@ def main() -> None:
 
             x_axis = np.arange(-trial_size, trial_size) * bin_size / 30_000
 
-            shaded_line_plot(
-                zscore(n_rem_trials.sum(1), axis=1), x_axis, "blue", "NREM"
-            )
-
-            shaded_line_plot(
-                zscore(awake_trials.sum(1), axis=1), x_axis, "red", "awake"
-            )
+            shaded_line_plot(n_rem_trials.sum(1), x_axis, "blue", "NREM")
+            shaded_line_plot(awake_trials.sum(1), x_axis, "red", "awake")
 
             1 / 0
 
@@ -303,10 +306,9 @@ def get_reactivation_strength(
     sessions: str,
     kilosort_path: str,
     region_boundaries: str,
-    start_time_pycontrol: float,
-    end_time_pycontrol: float,
+    pycontrol_conditioning_time_edges: Tuple[float, float],
+    pycontrol_resting_time_edges: Tuple[float, float],
 ):
-
     spike_times, spike_clusters, labels, closest_channel, aligners = process_probe(
         data_path=data_path,
         kilosort_path=kilosort_path,
@@ -320,16 +322,15 @@ def get_reactivation_strength(
 
     bin_width = (2 * window) / n_bins
 
-    train_array, y_train = get_training_data(
-        sessions, aligners, spike_clusters, spike_times, n_bins, window
+    start_conditioning, end_conditioning = aligners[0].B_to_A(
+        np.array(
+            [pycontrol_conditioning_time_edges[0], pycontrol_conditioning_time_edges[1]]
+        )
     )
-    train_array = np.swapaxes(train_array, 0, 1)
 
-    # Float cast to guard against smoothing ints rounding values
-    ssp_vectors = train_array.reshape(train_array.shape[0], -1).astype(np.float32)
-
-    # 100 ms sigma
-    ssp_vectors = gaussian_filter1d(ssp_vectors, sigma=int(0.1 / bin_width), axis=1)
+    ssp_vectors, conditioning_bin_edges = build_cluster_matrix(
+        spike_times, spike_clusters, start_conditioning, end_conditioning, bin_width
+    )
 
     # Sometimes get a cell that never spiked
     clusters_keep = np.sum(ssp_vectors, axis=1) > 0
@@ -338,21 +339,14 @@ def get_reactivation_strength(
 
     # Done in the same way as the lfp
     start_rest, end_rest = aligners[1].B_to_A(
-        np.array([start_time_pycontrol, end_time_pycontrol])
+        np.array([pycontrol_resting_time_edges[0], pycontrol_resting_time_edges[1]])
     )
-    rest_spikes_idx = (spike_times >= start_rest) & (spike_times <= end_rest)
-    rest_spikes = spike_times[rest_spikes_idx]
-    rest_spike_clusters = spike_clusters[rest_spikes_idx]
 
-    bin_edges = np.arange(int(start_rest), int(end_rest), int(bin_width * 30_000))
-    reactivation = []
+    reactivation, resting_bin_edges = build_cluster_matrix(
+        spike_times, spike_clusters, start_rest, end_rest, bin_width
+    )
+    reactivation = reactivation[clusters_keep, :]
 
-    for cluster_id in np.unique(spike_clusters)[clusters_keep]:
-        spike_times_cluster = rest_spikes[rest_spike_clusters == cluster_id]
-        binned = np.histogram(spike_times_cluster, bins=bin_edges)[0].astype(np.float32)
-        reactivation.append(gaussian_filter1d(binned, sigma=int(0.1 / bin_width)))
-
-    reactivation = np.array(reactivation)
     assert reactivation.shape[0] == ssp_vectors.shape[0]
     reactivation_strength = offline_reactivation(reactivation, comps, do_shuffle=False)
     print(f"reactivation strength found for {mouse} {imec}, saving")
@@ -363,9 +357,33 @@ def get_reactivation_strength(
 
     np.save(
         HERE / "results" / "reactivation_strength" / f"{mouse}_{imec}_binedges",
-        bin_edges,
+        resting_bin_edges,
     )
-    return reactivation_strength, bin_edges
+    return reactivation_strength, resting_bin_edges
+
+
+def build_cluster_matrix(
+    spike_times: np.ndarray,
+    spike_clusters: np.ndarray,
+    start: float,
+    end: float,
+    bin_width: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+
+    bin_edges = np.arange(int(start), int(end), int(bin_width * 30_000))
+
+    spike_idxs = (spike_times >= start) & (spike_times <= end)
+    spikes_matrix = spike_times[spike_idxs]
+    clusters_matrix = spike_clusters[spike_idxs]
+
+    matrix = []
+
+    for cluster_id in np.unique(spike_clusters):
+        spike_times_cluster = spikes_matrix[clusters_matrix == cluster_id]
+        binned = np.histogram(spike_times_cluster, bins=bin_edges)[0].astype(np.float32)
+        matrix.append(gaussian_filter1d(binned, sigma=int(0.1 / bin_width)))
+
+    return np.array(matrix), bin_edges
 
 
 if __name__ == "__main__":
