@@ -129,27 +129,6 @@ def main(data_folder: Path, lfp_path: Path) -> None:
     1 / 0
 
 
-def get_aligners(
-    sync_npx: np.ndarray, rsync_times: List[np.ndarray]
-) -> List[Rsync_aligner]:
-    chunk_start = 0
-    # A list of Rsync_aligner objects, one for each session
-    # So in theory, aligner 0 is the conditioning aligner.
-    aligners = []
-    for rsync_time in rsync_times:
-        aligners.append(
-            Rsync_aligner(
-                sync_npx[chunk_start : chunk_start + len(rsync_time)],
-                rsync_time,
-                raise_exception=True,
-            )
-        )
-
-        chunk_start += len(rsync_time)
-
-    return aligners
-
-
 def get_sound_videos(
     sounds: List[Sound], camera_frame_times: np.ndarray, video_path: Path
 ) -> None:

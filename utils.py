@@ -276,3 +276,43 @@ def get_lfp_index_sleep_state(
 def save_figure(name: str, path: Path):
     plt.rcParams["pdf.fonttype"] = 42
     plt.savefig(path / f"{name}.pdf", bbox_inches="tight", transparent=True)
+
+
+def build_path_dict() -> dict[str, list[Path]]:
+
+    umbrella = Path("/Volumes/MarcBusche/Alex/Reactivations")
+
+    kilosort_paths = list(umbrella.rglob("*/kilosort4"))
+    path_dict: dict[str, List[Path]] = {}
+    if len(kilosort_paths) == 0:
+        raise FileNotFoundError(
+            "No kilosort paths found. Please check the path to the data."
+        )
+    for kilosort_path in kilosort_paths:
+        mouse = kilosort_path.parts[-4]
+        # This mouse has bad data, see email
+        if mouse in ["11153"]:
+            continue
+        if mouse not in path_dict:
+            path_dict[mouse] = []
+        path_dict[mouse].append(kilosort_path)
+
+    return path_dict
+
+
+def shuffle_rows(matrix):
+    """
+    Shuffles the elements within each row of the given matrix independently.
+
+    Parameters:
+    matrix (numpy.ndarray): A 2D NumPy array where each row's elements are shuffled.
+
+    Returns:
+    numpy.ndarray: A new matrix with shuffled rows.
+    """
+    shuffled_matrix = (
+        matrix.copy()
+    )  # Make a copy to avoid modifying the original matrix
+    for row in shuffled_matrix:
+        np.random.shuffle(row)  # Shuffle elements within the row
+    return shuffled_matrix
