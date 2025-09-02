@@ -87,7 +87,7 @@ def get_lfp_signatures(
             / sampling_rate_lfp
         )
         assert start_rest < end_rest, "Start time must be before end time"
-        assert 10 * 60 > end_rest - start_rest > 40 * 60
+        assert 10 * 60 < end_rest - start_rest < 40 * 60
         lfp = extract_rawChunk(
             lfp_path,
             [start_rest, end_rest],  # now taking the recording length as a float
@@ -132,8 +132,6 @@ def get_lfp_signatures(
 def get_sync(lfp_path: Path, mouse: str, imec: str) -> np.ndarray:
     raw_sync_folder = Path(LOCAL_SSD / "lfp_syncs")
     raw_sync_path = raw_sync_folder / f"raw_sync_{mouse}_{imec}.npy"
-    if (raw_sync_path).exists():
-        return np.load(raw_sync_path)
 
     if raw_sync_path.exists():
         raw_sync = np.load(raw_sync_path)
@@ -814,5 +812,6 @@ def get_coupling_results():
 
 
 if __name__ == "__main__":
-    get_coupling_results()
+    main()
+    # get_coupling_results()
     # plot_spindle_results()
