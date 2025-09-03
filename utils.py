@@ -6,6 +6,7 @@ import numpy as np
 import cv2
 import pandas as pd
 
+from consts import KILOSORT_UMBRELLA
 from data_import import Session
 from models import LED, Sound
 from rsync import Rsync_aligner
@@ -280,9 +281,7 @@ def save_figure(name: str, path: Path):
 
 def build_path_dict() -> dict[str, list[Path]]:
 
-    umbrella = Path("/Volumes/MarcBusche/Alex/Reactivations")
-
-    kilosort_paths = list(umbrella.rglob("*/kilosort4"))
+    kilosort_paths = list(KILOSORT_UMBRELLA.rglob("*/kilosort4"))
     path_dict: dict[str, List[Path]] = {}
     if len(kilosort_paths) == 0:
         raise FileNotFoundError(
