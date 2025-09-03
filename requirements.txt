@@ -4,3 +4,4 @@ matplotlib
 pandas
 ffmpeg-python
 ripples @ git+https://github.com/neuromantic99/ripples.git
+opt-einsum

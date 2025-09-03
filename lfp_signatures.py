@@ -137,9 +137,13 @@ def get_sync(lfp_path: Path, mouse: str, imec: str) -> np.ndarray:
         raw_sync = np.load(raw_sync_path)
     else:
         print("Existing not found, loading raw sync from npyx")
-        raw_sync = load_sync_npyx(lfp_path)
+        raw_sync = load_sync_npyx(lfp_path, "lowpass")
 
     npx_sync_times = threshold_detect(raw_sync, 0.5)
+    # There are a few random sync pulses at the start from failed pycontrol sessions
+    if mouse == "11150":
+        npx_sync_times = npx_sync_times[-5435:]
+
     np.save(raw_sync_folder / f"npx_sync_times_{mouse}_{imec}.npy", npx_sync_times)
     return npx_sync_times
 

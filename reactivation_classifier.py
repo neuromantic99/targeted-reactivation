@@ -399,10 +399,13 @@ def process_probe(
         )
         np.save(kilosort_path.parent / "high_pass_sync.npy", npx_sync_times)
 
-    # This passes most of the time but doesn't for one mouse, the aligners don't error so oh well.
-    # assert sum(len(rsync) for rsync in rsync_times) == len(
-    #     npx_sync_times
-    # ), "Rsync times and NPX sync times do not match in length."
+    # There are a few random sync pulses at the start from failed sessions
+    if "11150" in str(kilosort_path):
+        npx_sync_times = npx_sync_times[-5435:]
+
+    assert sum(len(rsync) for rsync in rsync_times) == len(
+        npx_sync_times
+    ), "Rsync times and NPX sync times do not match in length."
 
     aligners = get_aligners(npx_sync_times, rsync_times)
 
