@@ -2,9 +2,8 @@ import sys
 from pathlib import Path
 from typing import Tuple
 
-import numpy as np
-import seaborn as sns
 from matplotlib import pyplot as plt
+import numpy as np
 from opt_einsum import contract
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import zscore
@@ -15,7 +14,7 @@ from gsheets_importer import gsheet2df
 from lfp_signatures import get_ca1_rsc_channels
 from models import RipplesCache
 from plotting import shaded_line_plot
-from reactivation_classifier import get_training_data, process_probe
+from reactivation_classifier import process_probe
 from rsync import Rsync_aligner
 from utils import build_path_dict, get_aligners, get_data_paths, shuffle_rows
 
@@ -136,7 +135,7 @@ def offline_reactivation(
 
     # outer product for each component b with itself
     # shape (components, cells, cells)
-    projection_matrices = np.einsum("kb,jb->bkj", ensemble_matrix, ensemble_matrix)
+    projection_matrices = contract("kb,jb->bkj", ensemble_matrix, ensemble_matrix)
     assert projection_matrices.shape == (
         n_components,
         n_cells,
@@ -147,7 +146,7 @@ def offline_reactivation(
     for b in range(projection_matrices.shape[0]):
         np.fill_diagonal(projection_matrices[b], 0)
 
-    reactivation_strength = np.einsum(
+    reactivation_strength = contract(
         "ik,bkj,ji->bi",
         offline_activity_matrix.T,  # Zi.T
         projection_matrices,  # Pb
@@ -182,7 +181,7 @@ def main() -> None:
             conditioning_frames[0],
             conditioning_frames[-1],
         )
-        resting_frames = np.load(frame_trigger_times[-1])
+        resting_frames = np.load(frame_trigger_times[1])
         pycontrol_resting_time_edges = (resting_frames[0], resting_frames[-1])
 
         sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
@@ -198,25 +197,35 @@ def main() -> None:
                 reactivation_strength = np.load(
                     HERE / "results" / "reactivation_strength" / f"{mouse}_{imec}.npy"
                 )
-                bin_edges = np.load(
+                resting_bin_edges = np.load(
                     HERE
                     / "results"
                     / "reactivation_strength"
                     / f"{mouse}_{imec}_binedges.npy"
                 )
             else:
-                reactivation_strength, bin_edges = get_reactivation_strength(
-                    mouse=mouse,
-                    imec=imec,
+                reactivation_strength, resting_bin_edges = get_reactivation_strength(
                     data_path=data_path,
-                    sessions=sessions,
                     kilosort_path=kilosort_path,
                     region_boundaries=region_boundaries,
                     pycontrol_conditioning_time_edges=pycontrol_conditioning_time_edges,
                     pycontrol_resting_time_edges=pycontrol_resting_time_edges,
                 )
 
-            continue
+                print(f"reactivation strength found for {mouse} {imec}, saving")
+                np.save(
+                    HERE / "results" / "reactivation_strength" / f"{mouse}_{imec}",
+                    reactivation_strength,
+                )
+
+                np.save(
+                    HERE
+                    / "results"
+                    / "reactivation_strength"
+                    / f"{mouse}_{imec}_binedges",
+                    resting_bin_edges,
+                )
+
             with open(
                 HERE / "results" / "ripples" / f"{mouse}_imec_{imec[-1]}.json"
             ) as f:
@@ -238,6 +247,10 @@ def main() -> None:
                 / f"npx_sync_times_{mouse}_imec_{imec[-1]}.npy"
             )
             spikes_sync = np.load(kilosort_path.parent / "high_pass_sync.npy")
+            # Some random sync pulses at the start from failed pycontrol sessions
+            if mouse == "11150":
+                spikes_sync = spikes_sync[-5435:]
+
             assert len(lfp_sync) == len(spikes_sync)
 
             lfp_spikes_aligner = Rsync_aligner(
@@ -245,7 +258,7 @@ def main() -> None:
                 lfp_sync,
                 raise_exception=True,
             )
-            assert int(lfp_spikes_aligner.units_B) == 30_000 / 2500
+            assert round(lfp_spikes_aligner.units_B) == 30_000 / 2500
 
             # The ripple times are relative to the first sample in the resting session, so find this sample
             # relative to the whole recording
@@ -259,30 +272,44 @@ def main() -> None:
             ripple_times_spikes = np.array(
                 [
                     lfp_spikes_aligner.B_to_A(
-                        np.array([r.onset + first_sample, r.offset + first_sample])
+                        np.array(
+                            [
+                                r.onset + first_sample,
+                                r.offset + first_sample,
+                                r.peak_idx + first_sample,
+                            ]
+                        )
                     ).astype(int)
                     for r in ripples
                 ]
             )
-            assert bin_edges[0] < np.min(ripple_times_spikes)
-            assert bin_edges[-1] > np.max(ripple_times_spikes)
-            # plt.plot(bin_edges[:-1], np.mean(reactivation_strength, axis=0))
-            # for r in ripple_times_spikes:
-            #     plt.axvspan(r[0], r[1], alpha=0.5, color="red")
+            assert resting_bin_edges[0] < np.min(ripple_times_spikes)
+            assert resting_bin_edges[-1] > np.max(ripple_times_spikes)
 
-            bin_size = bin_edges[1] - bin_edges[0]
-            trial_size = 15_000 // bin_size  # 1 second either side
+            bin_size = resting_bin_edges[1] - resting_bin_edges[0]
+            trial_size = 15_000 // bin_size  # 0.5 seconds either side
             n_rem_trials = []
             awake_trials = []
 
             for idx, r in enumerate(ripple_times_spikes):
                 if state[idx] not in ["nrem", "awake"]:
                     continue
+                closest_bin = np.argmin(np.abs(resting_bin_edges - r[2]))
+                if (
+                    closest_bin - trial_size < 0
+                    or closest_bin + trial_size > resting_bin_edges.shape[0]
+                ):
+                    continue
 
-                closest_bin = np.argmin(np.abs(bin_edges - r[0]))
                 trial_response = reactivation_strength[
                     :, closest_bin - trial_size : closest_bin + trial_size
                 ]
+
+                assert trial_response.shape == (
+                    reactivation_strength.shape[0],
+                    2 * trial_size,
+                )
+
                 if state[idx] == "nrem":
                     n_rem_trials.append(trial_response)
                 elif state[idx] == "awake":
@@ -293,17 +320,43 @@ def main() -> None:
 
             x_axis = np.arange(-trial_size, trial_size) * bin_size / 30_000
 
-            shaded_line_plot(n_rem_trials.sum(1), x_axis, "blue", "NREM")
-            shaded_line_plot(awake_trials.sum(1), x_axis, "red", "awake")
+            def zscore_components(arr: np.ndarray) -> np.ndarray:
+                reshaped = arr.reshape(arr.shape[0] * arr.shape[2], arr.shape[1])
+                zscored = zscore(reshaped, axis=0)
+                return zscored.reshape(arr.shape)
 
-            1 / 0
+            plt.figure()
+
+            # shaded_line_plot(
+            #     zscore_components(n_rem_trials).mean(1), x_axis, "blue", "NREM"
+            # )
+            # shaded_line_plot(
+            #     zscore_components(awake_trials).mean(1), x_axis, "red", "awake"
+            # )
+            n_rem_trials = zscore_components(n_rem_trials)
+            awake_trials = zscore_components(awake_trials)
+
+            for comp in range(n_rem_trials.shape[1]):
+                plt.plot(
+                    x_axis, n_rem_trials[:, comp, :].mean(0), color="blue", alpha=0.5
+                )
+
+            for comp in range(awake_trials.shape[1]):
+                plt.plot(
+                    x_axis, awake_trials[:, comp, :].mean(0), color="red", alpha=0.5
+                )
+
+            plt.savefig(
+                HERE
+                / "plots"
+                / "reactivation_strength"
+                / f"{mouse}_{imec}_reactivation_strength.png"
+            )
+            plt.title(f"{mouse}_{imec}_reactivation_strength")
 
 
 def get_reactivation_strength(
-    mouse: str,
-    imec: str,
     data_path: Path,
-    sessions: str,
     kilosort_path: str,
     region_boundaries: str,
     pycontrol_conditioning_time_edges: Tuple[float, float],
@@ -328,7 +381,7 @@ def get_reactivation_strength(
         )
     )
 
-    ssp_vectors, conditioning_bin_edges = build_cluster_matrix(
+    ssp_vectors, _ = build_cluster_matrix(
         spike_times, spike_clusters, start_conditioning, end_conditioning, bin_width
     )
 
@@ -345,20 +398,12 @@ def get_reactivation_strength(
     reactivation, resting_bin_edges = build_cluster_matrix(
         spike_times, spike_clusters, start_rest, end_rest, bin_width
     )
+
     reactivation = reactivation[clusters_keep, :]
 
     assert reactivation.shape[0] == ssp_vectors.shape[0]
     reactivation_strength = offline_reactivation(reactivation, comps, do_shuffle=False)
-    print(f"reactivation strength found for {mouse} {imec}, saving")
-    np.save(
-        HERE / "results" / "reactivation_strength" / f"{mouse}_{imec}",
-        reactivation_strength,
-    )
 
-    np.save(
-        HERE / "results" / "reactivation_strength" / f"{mouse}_{imec}_binedges",
-        resting_bin_edges,
-    )
     return reactivation_strength, resting_bin_edges
 
 
