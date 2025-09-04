@@ -110,6 +110,10 @@ def offline_reactivation(
     Rbi = ZiT * Pb * Zb
     """
 
+    offline_activity_matrix = zscore(offline_activity_matrix, axis=1)
+    # Remove nans from silent neurons
+    offline_activity_matrix = np.nan_to_num(offline_activity_matrix)
+
     if do_shuffle:
         # """ICA components were shuffled by randomly permuting the weight matrix w across
         # PCs and recalculating the reactivation strength."""
@@ -122,6 +126,14 @@ def offline_reactivation(
     n_timepoints = offline_activity_matrix.shape[1]
     n_cells = ensemble_matrix.shape[0]
     n_components = ensemble_matrix.shape[1]
+
+    # Since the sign of the output of ICA is arbitrary, the signs of the weight vector were set such that
+    # the highest absolute weight was set to positive.
+    # pmc.ncbi.nlm.nih.gov/articles/instance/10760112/bin/NIHPP2023.12.12.571373V1-supplement-1.pdf
+    for b in range(n_components):
+        max_idx = np.argmax(np.abs(ensemble_matrix[:, b]))
+        if ensemble_matrix[max_idx, b] < 0:
+            ensemble_matrix[:, b] *= -1  # flip entire column
 
     # Einstein summation convention
     # components -> b
@@ -186,7 +198,7 @@ def main() -> None:
 
         sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
 
-        redo = False
+        redo = True
 
         for kilosort_path in kilosort_paths:
             region_boundaries = get_ca1_rsc_channels(kilosort_path, paths_df)
