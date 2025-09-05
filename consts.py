@@ -11,3 +11,4 @@ KILOSORT_UMBRELLA = Path("/mnt/MarcBusche/Alex/Reactivations")
 SERVER_CACHE_PATH = Path(
     "/mnt/MarcBusche/James/caches/spontaneous_reactivation_strength"
 )
+LFP_SYNC_FOLDER = Path("/mnt/local-ssd/james/targeted-reactivation/lfp_syncs")
