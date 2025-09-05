@@ -8,7 +8,7 @@ from opt_einsum import contract
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import zscore
 
-from consts import LOCAL_SSD
+from consts import LOCAL_SSD, SERVER_CACHE_PATH
 from data_import import Session
 from gsheets_importer import gsheet2df
 from lfp_signatures import get_ca1_rsc_channels
@@ -203,17 +203,12 @@ def main() -> None:
         for kilosort_path in kilosort_paths:
             region_boundaries = get_ca1_rsc_channels(kilosort_path, paths_df)
             imec = kilosort_path.parent.name.split("_")[-1]
-            if (
-                HERE / "results" / "reactivation_strength" / f"{mouse}_{imec}.npy"
-            ).exists() and not redo:
+            if (SERVER_CACHE_PATH / f"{mouse}_{imec}.npy").exists() and not redo:
                 reactivation_strength = np.load(
-                    HERE / "results" / "reactivation_strength" / f"{mouse}_{imec}.npy"
+                    SERVER_CACHE_PATH / f"{mouse}_{imec}.npy"
                 )
                 resting_bin_edges = np.load(
-                    HERE
-                    / "results"
-                    / "reactivation_strength"
-                    / f"{mouse}_{imec}_binedges.npy"
+                    SERVER_CACHE_PATH / f"{mouse}_{imec}_binedges.npy"
                 )
             else:
                 reactivation_strength, resting_bin_edges = get_reactivation_strength(
@@ -226,15 +221,12 @@ def main() -> None:
 
                 print(f"reactivation strength found for {mouse} {imec}, saving")
                 np.save(
-                    HERE / "results" / "reactivation_strength" / f"{mouse}_{imec}",
+                    SERVER_CACHE_PATH / f"{mouse}_{imec}",
                     reactivation_strength,
                 )
 
                 np.save(
-                    HERE
-                    / "results"
-                    / "reactivation_strength"
-                    / f"{mouse}_{imec}_binedges",
+                    SERVER_CACHE_PATH / f"{mouse}_{imec}_binedges",
                     resting_bin_edges,
                 )
 
@@ -381,18 +373,13 @@ def get_reactivation_strength(
         bin_data=False,
     )
 
-    # 5 seconds either side of the LED in 1000 bins, so 100 ms
-    window = 5
-    n_bins = 1000
-
-    bin_width = (2 * window) / n_bins
-
     start_conditioning, end_conditioning = aligners[0].B_to_A(
         np.array(
             [pycontrol_conditioning_time_edges[0], pycontrol_conditioning_time_edges[1]]
         )
     )
 
+    bin_width = 0.02
     ssp_vectors, _ = build_cluster_matrix(
         spike_times, spike_clusters, start_conditioning, end_conditioning, bin_width
     )
@@ -438,7 +425,7 @@ def build_cluster_matrix(
     for cluster_id in np.unique(spike_clusters):
         spike_times_cluster = spikes_matrix[clusters_matrix == cluster_id]
         binned = np.histogram(spike_times_cluster, bins=bin_edges)[0].astype(np.float32)
-        matrix.append(gaussian_filter1d(binned, sigma=int(0.1 / bin_width)))
+        matrix.append(binned)
 
     return np.array(matrix), bin_edges
 
