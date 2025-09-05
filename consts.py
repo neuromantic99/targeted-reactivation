@@ -8,3 +8,6 @@ RIPPLE_BAND = [120, 250]
 SUPRA_RIPPLE_BAND = [250, 500]
 
 KILOSORT_UMBRELLA = Path("/mnt/MarcBusche/Alex/Reactivations")
+SERVER_CACHE_PATH = Path(
+    "/mnt/MarcBusche/James/caches/spontaneous_reactivation_strength"
+)
