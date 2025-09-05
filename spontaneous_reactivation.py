@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from typing import Tuple
+from typing import List, Tuple
 import statsmodels.formula.api as smf
 
 from matplotlib import pyplot as plt
@@ -20,6 +20,7 @@ from plotting import shaded_line_plot
 from reactivation_classifier import process_probe
 from rsync import Rsync_aligner
 from utils import build_path_dict, get_aligners, get_data_paths, shuffle_rows
+from ripples.models import CandidateEvent
 
 HERE = Path(__file__).parent
 sys.path.append(str(HERE.parent))
@@ -204,11 +205,22 @@ def main() -> None:
 
         sessions = [Session(pycontrol_file) for pycontrol_file in pycontrol_files]
 
-        redo = True
-
         for kilosort_path in kilosort_paths:
             region_boundaries = get_ca1_rsc_channels(kilosort_path, paths_df)
             imec = kilosort_path.parent.name.split("_")[-1]
+
+            lfp_sync = np.load(
+                Path(LOCAL_SSD / "lfp_syncs")
+                / f"npx_sync_times_{mouse}_imec_{imec[-1]}.npy"
+            )
+            spikes_sync = np.load(kilosort_path.parent / "high_pass_sync.npy")
+            # Some random sync pulses at the start from failed pycontrol sessions
+            if mouse == "11150":
+                spikes_sync = spikes_sync[-5435:]
+
+            assert len(lfp_sync) == len(spikes_sync)
+            redo = False
+
             if (SERVER_CACHE_PATH / f"{mouse}_{imec}.npy").exists() and not redo:
                 reactivation_strength = np.load(
                     SERVER_CACHE_PATH / f"{mouse}_{imec}.npy"
@@ -236,119 +248,23 @@ def main() -> None:
                     resting_bin_edges,
                 )
 
-            with open(
-                HERE / "results" / "ripples" / f"{mouse}_imec_{imec[-1]}.json"
-            ) as f:
-                ripple_cache = RipplesCache.model_validate_json(f.read())
-
-            passing_checks = (
-                np.array(ripple_cache.common_average_reference_check)
-                & np.array(ripple_cache.frequency_check)
-                & np.array(ripple_cache.super_ripple_check)
+            components = align_reactivation_to_ripples(
+                mouse=mouse,
+                imec=imec,
+                lfp_sync=lfp_sync,
+                spikes_sync=spikes_sync,
+                pycontrol_resting_time_edges=pycontrol_resting_time_edges,
+                sessions=sessions,
+                resting_bin_edges=resting_bin_edges,
+                reactivation_strength=reactivation_strength,
             )
-            if mouse == "00053":
-                passing_checks = passing_checks[: len(ripple_cache.candidate_events)]
-            ripples = np.array(ripple_cache.candidate_events)[passing_checks]
-            state = np.array(ripple_cache.state)[passing_checks]
-
-            # Assumes that you've already loaded the lfp syncs to the local ssd using lfp_signatures/get_sync()
-            lfp_sync = np.load(
-                Path(LOCAL_SSD / "lfp_syncs")
-                / f"npx_sync_times_{mouse}_imec_{imec[-1]}.npy"
-            )
-            spikes_sync = np.load(kilosort_path.parent / "high_pass_sync.npy")
-            # Some random sync pulses at the start from failed pycontrol sessions
-            if mouse == "11150":
-                spikes_sync = spikes_sync[-5435:]
-
-            assert len(lfp_sync) == len(spikes_sync)
-
-            lfp_spikes_aligner = Rsync_aligner(
-                spikes_sync,
-                lfp_sync,
-                raise_exception=True,
-            )
-            assert round(lfp_spikes_aligner.units_B) == 30_000 / 2500
-
-            # The ripple times are relative to the first sample in the resting session, so find this sample
-            # relative to the whole recording
-            lfp_pycontrol_aligner = get_aligners(
-                lfp_sync, [session.times["rsync"] for session in sessions]
-            )[1]
-            first_sample = lfp_pycontrol_aligner.B_to_A(
-                np.array([pycontrol_resting_time_edges[0]])
-            )[0]
-
-            ripple_times_spikes = np.array(
-                [
-                    lfp_spikes_aligner.B_to_A(
-                        np.array(
-                            [
-                                r.onset + first_sample,
-                                r.offset + first_sample,
-                                r.peak_idx + first_sample,
-                            ]
-                        )
-                    ).astype(int)
-                    for r in ripples
-                ]
-            )
-            assert resting_bin_edges[0] < np.min(ripple_times_spikes)
-            # Add a small buffer to ensure the last ripple is included
-            assert resting_bin_edges[-1] > np.max(ripple_times_spikes) - 300
-
-            bin_size = resting_bin_edges[1] - resting_bin_edges[0]
-            trial_size = (30_000 * 8) // bin_size
-            n_rem_trials = []
-            awake_trials = []
-
-            for idx, r in enumerate(ripple_times_spikes):
-                if state[idx] not in ["nrem", "awake"]:
-                    continue
-                closest_bin = np.argmin(np.abs(resting_bin_edges - r[2]))
-                if (
-                    closest_bin - trial_size < 0
-                    or closest_bin + trial_size > resting_bin_edges.shape[0]
-                ):
-                    continue
-
-                trial_response = reactivation_strength[
-                    :, closest_bin - trial_size : closest_bin + trial_size
-                ]
-
-                assert trial_response.shape == (
-                    reactivation_strength.shape[0],
-                    2 * trial_size,
-                )
-
-                if state[idx] == "nrem":
-                    n_rem_trials.append(trial_response)
-                elif state[idx] == "awake":
-                    awake_trials.append(trial_response)
-
-            n_rem_trials = np.array(n_rem_trials)
-            awake_trials = np.array(awake_trials)
-
-            print(
-                f"{mouse} {imec} number nrem trials: {n_rem_trials.shape[0]}. number awake trials: {awake_trials.shape[0]}"
-            )
-
-            components = []
-            for component in range(n_rem_trials.shape[1]):
-                assembly_data = n_rem_trials[:, component, :]
-                # compute global mean/std across ripples and time
-                mean = assembly_data.mean()
-                std = assembly_data.std(ddof=1)
-                # zscore the whole (n_ripples, n_time) block
-                zdata = (assembly_data - mean) / std
-                # average across ripples -> one trace per assembly
-                components.append(zdata.mean(axis=0))
 
             all_components.extend(components)
             mouse_id.extend([mouse] * len(components))
 
-            x_axis = np.arange(-trial_size, trial_size) * bin_size / 30_000
-
+    bin_size = resting_bin_edges[1] - resting_bin_edges[0]
+    trial_size = (30_000 * 8) // bin_size
+    x_axis = np.arange(-trial_size, trial_size) * bin_size / 30_000
     peak_start = np.where(x_axis == -0.2)[0][0]
     peak_end = np.where(x_axis == 0.2)[0][0]
 
@@ -404,13 +320,139 @@ def main() -> None:
     1 / 0
 
 
+def align_reactivation_to_ripples(
+    mouse: str,
+    imec: str,
+    lfp_sync: np.ndarray,
+    spikes_sync: np.ndarray,
+    pycontrol_resting_time_edges: Tuple[float, float],
+    sessions: List[Session],
+    resting_bin_edges: np.ndarray,
+    reactivation_strength: np.ndarray,
+) -> Tuple[float, int, List[np.ndarray]]:
+
+    with open(HERE / "results" / "ripples" / f"{mouse}_imec_{imec[-1]}.json") as f:
+        ripple_cache = RipplesCache.model_validate_json(f.read())
+
+    passing_checks = (
+        np.array(ripple_cache.common_average_reference_check)
+        & np.array(ripple_cache.frequency_check)
+        & np.array(ripple_cache.super_ripple_check)
+    )
+    if mouse == "00053":
+        passing_checks = passing_checks[: len(ripple_cache.candidate_events)]
+    ripples = np.array(ripple_cache.candidate_events)[passing_checks]
+    state = np.array(ripple_cache.state)[passing_checks]
+
+    # Assumes that you've already loaded the lfp syncs to the local ssd using lfp_signatures/get_sync()
+    ripple_times_spikes = get_ripple_times_in_spikes(
+        spikes_sync=spikes_sync,
+        lfp_sync=lfp_sync,
+        pycontrol_time_edges=pycontrol_resting_time_edges,
+        sessions=sessions,
+        ripples=ripples,
+    )
+    assert resting_bin_edges[0] < np.min(ripple_times_spikes)
+    # Add a small buffer to ensure the last ripple is included
+    assert resting_bin_edges[-1] > np.max(ripple_times_spikes) - 300
+
+    bin_size = resting_bin_edges[1] - resting_bin_edges[0]
+    trial_size = (30_000 * 8) // bin_size
+    n_rem_trials = []
+    awake_trials = []
+
+    for idx, r in enumerate(ripple_times_spikes):
+        if state[idx] not in ["nrem", "awake"]:
+            continue
+        closest_bin = np.argmin(np.abs(resting_bin_edges - r[2]))
+        if (
+            closest_bin - trial_size < 0
+            or closest_bin + trial_size > resting_bin_edges.shape[0]
+        ):
+            continue
+
+        trial_response = reactivation_strength[
+            :, closest_bin - trial_size : closest_bin + trial_size
+        ]
+
+        assert trial_response.shape == (
+            reactivation_strength.shape[0],
+            2 * trial_size,
+        )
+
+        if state[idx] == "nrem":
+            n_rem_trials.append(trial_response)
+        elif state[idx] == "awake":
+            awake_trials.append(trial_response)
+
+    n_rem_trials = np.array(n_rem_trials)
+    awake_trials = np.array(awake_trials)
+
+    print(
+        f"{mouse} {imec} number nrem trials: {n_rem_trials.shape[0]}. number awake trials: {awake_trials.shape[0]}"
+    )
+
+    components = []
+    for component in range(n_rem_trials.shape[1]):
+        assembly_data = n_rem_trials[:, component, :]
+        # compute global mean/std across ripples and time
+        mean = assembly_data.mean()
+        std = assembly_data.std(ddof=1)
+        # zscore the whole (n_ripples, n_time) block
+        zdata = (assembly_data - mean) / std
+        # average across ripples -> one trace per assembly
+        components.append(zdata.mean(axis=0))
+    return components
+
+
+def get_ripple_times_in_spikes(
+    spikes_sync: np.ndarray,
+    lfp_sync: np.ndarray,
+    pycontrol_time_edges: Tuple[float, float],
+    sessions: List[Session],
+    ripples: List[CandidateEvent],
+) -> np.ndarray:
+
+    lfp_spikes_aligner = Rsync_aligner(
+        spikes_sync,
+        lfp_sync,
+        raise_exception=True,
+    )
+    assert round(lfp_spikes_aligner.units_B) == 30_000 / 2500
+
+    # The ripple times are relative to the first sample in the resting session, so find this sample
+    # relative to the whole recording
+    lfp_pycontrol_aligner = get_aligners(
+        lfp_sync, [session.times["rsync"] for session in sessions]
+    )[1]
+    first_sample = lfp_pycontrol_aligner.B_to_A(np.array([pycontrol_time_edges[0]]))[0]
+
+    ripple_times_spikes = np.array(
+        [
+            lfp_spikes_aligner.B_to_A(
+                np.array(
+                    [
+                        r.onset + first_sample,
+                        r.offset + first_sample,
+                        r.peak_idx + first_sample,
+                    ]
+                )
+            ).astype(int)
+            for r in ripples
+        ]
+    )
+
+    return ripple_times_spikes
+
+
 def get_reactivation_strength(
     data_path: Path,
-    kilosort_path: str,
-    region_boundaries: str,
+    kilosort_path: Path,
+    region_boundaries: Tuple[int, int, int, int],
     pycontrol_conditioning_time_edges: Tuple[float, float],
     pycontrol_resting_time_edges: Tuple[float, float],
-):
+) -> Tuple[np.ndarray, np.ndarray]:
+
     spike_times, spike_clusters, labels, closest_channel, aligners = process_probe(
         data_path=data_path,
         kilosort_path=kilosort_path,
