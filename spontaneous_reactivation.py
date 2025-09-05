@@ -1,12 +1,15 @@
 import sys
 from pathlib import Path
 from typing import Tuple
+import statsmodels.formula.api as smf
 
 from matplotlib import pyplot as plt
 import numpy as np
 from opt_einsum import contract
+import pandas as pd
 from scipy.ndimage import gaussian_filter1d
 from scipy.stats import zscore
+import seaborn as sns
 
 from consts import LOCAL_SSD, SERVER_CACHE_PATH
 from data_import import Session
@@ -178,6 +181,9 @@ def main() -> None:
     path_dict = build_path_dict()
     paths_df = gsheet2df("112rq_5qilRHtYUFnFwpjDQeF4XKyTdY6qJhIwAnykN8", "Sheet1", 1)
 
+    all_components = []
+    mouse_id = []
+
     for mouse, kilosort_paths in path_dict.items():
         assert all(
             [
@@ -288,10 +294,11 @@ def main() -> None:
                 ]
             )
             assert resting_bin_edges[0] < np.min(ripple_times_spikes)
-            assert resting_bin_edges[-1] > np.max(ripple_times_spikes)
+            # Add a small buffer to ensure the last ripple is included
+            assert resting_bin_edges[-1] > np.max(ripple_times_spikes) - 300
 
             bin_size = resting_bin_edges[1] - resting_bin_edges[0]
-            trial_size = 15_000 // bin_size  # 0.5 seconds either side
+            trial_size = (30_000 * 8) // bin_size
             n_rem_trials = []
             awake_trials = []
 
@@ -322,41 +329,79 @@ def main() -> None:
             n_rem_trials = np.array(n_rem_trials)
             awake_trials = np.array(awake_trials)
 
+            print(
+                f"{mouse} {imec} number nrem trials: {n_rem_trials.shape[0]}. number awake trials: {awake_trials.shape[0]}"
+            )
+
+            components = []
+            for component in range(n_rem_trials.shape[1]):
+                assembly_data = n_rem_trials[:, component, :]
+                # compute global mean/std across ripples and time
+                mean = assembly_data.mean()
+                std = assembly_data.std(ddof=1)
+                # zscore the whole (n_ripples, n_time) block
+                zdata = (assembly_data - mean) / std
+                # average across ripples -> one trace per assembly
+                components.append(zdata.mean(axis=0))
+
+            all_components.extend(components)
+            mouse_id.extend([mouse] * len(components))
+
             x_axis = np.arange(-trial_size, trial_size) * bin_size / 30_000
 
-            def zscore_components(arr: np.ndarray) -> np.ndarray:
-                reshaped = arr.reshape(arr.shape[0] * arr.shape[2], arr.shape[1])
-                zscored = zscore(reshaped, axis=0)
-                return zscored.reshape(arr.shape)
+    peak_start = np.where(x_axis == -0.2)[0][0]
+    peak_end = np.where(x_axis == 0.2)[0][0]
 
-            plt.figure()
+    df = pd.DataFrame(
+        {
+            "result": [np.mean(comp[peak_start:peak_end]) for comp in all_components],
+            "mouse": mouse_id,
+            "genotype": ["WT" if m[:3] == "000" else "NLGF" for m in mouse_id],
+        }
+    )
 
-            # shaded_line_plot(
-            #     zscore_components(n_rem_trials).mean(1), x_axis, "blue", "NREM"
-            # )
-            # shaded_line_plot(
-            #     zscore_components(awake_trials).mean(1), x_axis, "red", "awake"
-            # )
-            n_rem_trials = zscore_components(n_rem_trials)
-            awake_trials = zscore_components(awake_trials)
+    model = smf.mixedlm(
+        "result ~ genotype",
+        df,
+        groups=df["mouse"],
+        use_sqrt=True,
+    )
+    model_fit = model.fit(reml=False)
+    assert model_fit.converged
+    print(model_fit.summary())
+    wt_results = np.array(
+        [comp for idx, comp in enumerate(all_components) if mouse_id[idx][:3] == "000"]
+    )
+    nlgf_results = np.array(
+        [comp for idx, comp in enumerate(all_components) if mouse_id[idx][:3] != "000"]
+    )
 
-            for comp in range(n_rem_trials.shape[1]):
-                plt.plot(
-                    x_axis, n_rem_trials[:, comp, :].mean(0), color="blue", alpha=0.5
-                )
+    plt.figure()
+    shaded_line_plot(wt_results, x_axis=x_axis, color="blue", label="WT")
+    shaded_line_plot(nlgf_results, x_axis=x_axis, color="red", label="NLGF")
 
-            for comp in range(awake_trials.shape[1]):
-                plt.plot(
-                    x_axis, awake_trials[:, comp, :].mean(0), color="red", alpha=0.5
-                )
+    plt.figure()
+    sns.boxplot(data=df, x="genotype", y="result")
 
-            plt.savefig(
-                HERE
-                / "plots"
-                / "reactivation_strength"
-                / f"{mouse}_{imec}_reactivation_strength.png"
-            )
-            plt.title(f"{mouse}_{imec}_reactivation_strength")
+    plt.figure()
+    for comp in wt_results:
+
+        plt.plot(
+            x_axis,
+            comp,
+            color="blue",
+            alpha=0.2,
+        )
+
+    for comp in nlgf_results:
+        plt.plot(
+            x_axis,
+            comp,
+            color="red",
+            alpha=0.2,
+        )
+
+    1 / 0
 
 
 def get_reactivation_strength(
