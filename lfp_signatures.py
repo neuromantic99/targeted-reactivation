@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from pathlib import Path, PureWindowsPath
-from typing import Tuple
+from typing import Literal, Tuple
 import numpy as np
 import pandas as pd
 from ripples.utils import (
@@ -16,7 +16,7 @@ import traceback
 from npyx import extract_rawChunk, read_metadata
 
 from ripples.utils_npyx import load_sync_npyx
-from consts import LOCAL_SSD
+from consts import KILOSORT_UMBRELLA, LFP_SYNC_FOLDER, LOCAL_SSD
 from detect_ripples import detect_ripples
 from detect_slow_oscillations import detect_slow_oscillations
 from detect_spindles import detect_spindles
@@ -42,7 +42,9 @@ SHUFFLED_COLOR = sns.color_palette("tab10")[2]
 
 
 def get_lfp_signatures(
-    lfp_path: Path, region_channels: Tuple[int, int, int, int]
+    lfp_path: Path,
+    region_channels: Tuple[int, int, int, int],
+    session_type: Literal["conditioning", "resting", "tones"],
 ) -> None:
     mouse = lfp_path.parent.parent.name
     imec = f"imec_{str(lfp_path).split('imec')[1]}"
@@ -71,26 +73,45 @@ def get_lfp_signatures(
         rsync_times,
     )
 
+    aligner = (
+        aligners[0]
+        if session_type == "conditioning"
+        else aligners[1] if session_type == "resting" else aligners[2]
+    )
+
     # This should be very close to the sampling rate reported by neuropixels but this is slightly more
     # accurate when aligning to pycontrol. In practice either are probably fine.
-    assert abs(aligners[1].units_B - meta["lowpass"]["sampling_rate"]) < 1
+    assert abs(aligner.units_B - meta["lowpass"]["sampling_rate"]) < 1
     sampling_rate_lfp = meta["lowpass"]["sampling_rate"]
 
-    resting_lfp_path = LOCAL_SSD / f"resting_lfps/{mouse}_{imec}.npy"
-    if (resting_lfp_path).exists():
-        print("loading existing resting LFP")
-        lfp = np.load(resting_lfp_path)
+    lfp_chunk_path = LOCAL_SSD / "lfp_chunks" / f"{mouse}_{imec}_{session_type}.npy"
+    if (lfp_chunk_path).exists():
+        print("loading existing LFP chunk")
+        lfp = np.load(lfp_chunk_path)
     else:
-        frame_triggers = np.load(frame_trigger_times[1])
-        start_rest, end_rest = (
-            aligners[1].B_to_A(np.array([frame_triggers[0], frame_triggers[-1]]))
+        frame_triggers = np.load(
+            frame_trigger_times[0]
+            if session_type == "conditioning"
+            else (
+                frame_trigger_times[1]
+                if session_type == "resting"
+                else frame_trigger_times[2]
+            )
+        )
+        start_lfp_chunk_seconds, end_lfp_chunk_seconds = (
+            aligner.B_to_A(np.array([frame_triggers[0], frame_triggers[-1]]))
             / sampling_rate_lfp
         )
-        assert start_rest < end_rest, "Start time must be before end time"
-        assert 10 * 60 < end_rest - start_rest < 40 * 60
+        assert (
+            start_lfp_chunk_seconds < end_lfp_chunk_seconds
+        ), "Start time must be before end time"
+        assert 10 * 60 < end_lfp_chunk_seconds - start_lfp_chunk_seconds < 40 * 60
         lfp = extract_rawChunk(
             lfp_path,
-            [start_rest, end_rest],  # now taking the recording length as a float
+            [
+                start_lfp_chunk_seconds,
+                end_lfp_chunk_seconds,
+            ],  # now taking the recording length as a float
             channels=np.arange(384),
             filt_key="lowpass",  # NPX data is devided in "high-pass" = spiking data and "low-pass" = LFP, no filter is being applied
             save=0,
@@ -110,7 +131,7 @@ def get_lfp_signatures(
             again=False,
         )
 
-        np.save(resting_lfp_path, lfp)
+        np.save(lfp_chunk_path, lfp)
 
     # plot_lfp_profile(
     #     lfp,
@@ -120,18 +141,30 @@ def get_lfp_signatures(
     #     imec=imec,
     # )
 
-    detect_ripples(mouse, imec, ca1_low, ca1_high, data_folder, sampling_rate_lfp, lfp)
-    lfp_spindle, max_power_channel = detect_spindles(
-        mouse, imec, rsc_low, rsc_high, data_folder, sampling_rate_lfp, lfp
+    detect_ripples(
+        mouse,
+        imec,
+        ca1_low,
+        ca1_high,
+        data_folder,
+        sampling_rate_lfp,
+        lfp,
+        session_type=session_type,
     )
-    detect_slow_oscillations(
-        lfp_spindle, max_power_channel, sampling_rate_lfp, mouse, imec, data_folder
-    )
+
+    # lfp_spindle, max_power_channel = detect_spindles(
+    #     mouse, imec, rsc_low, rsc_high, data_folder, sampling_rate_lfp, lfp
+    # )
+    # detect_slow_oscillations(
+    #     lfp_spindle, max_power_channel, sampling_rate_lfp, mouse, imec, data_folder
+    # )
 
 
 def get_sync(lfp_path: Path, mouse: str, imec: str) -> np.ndarray:
-    raw_sync_folder = Path(LOCAL_SSD / "lfp_syncs")
-    raw_sync_path = raw_sync_folder / f"raw_sync_{mouse}_{imec}.npy"
+    raw_sync_path = LFP_SYNC_FOLDER / f"raw_sync_{mouse}_{imec}.npy"
+    processed_sync_path = LFP_SYNC_FOLDER / f"npx_sync_times_{mouse}_{imec}.npy"
+    if processed_sync_path.exists():
+        return np.load(processed_sync_path)
 
     if raw_sync_path.exists():
         raw_sync = np.load(raw_sync_path)
@@ -144,7 +177,7 @@ def get_sync(lfp_path: Path, mouse: str, imec: str) -> np.ndarray:
     if mouse == "11150":
         npx_sync_times = npx_sync_times[-5435:]
 
-    np.save(raw_sync_folder / f"npx_sync_times_{mouse}_{imec}.npy", npx_sync_times)
+    np.save(processed_sync_path, npx_sync_times)
     return npx_sync_times
 
 
@@ -162,8 +195,7 @@ def get_ca1_rsc_channels(lfp_file: Path, df: pd.DataFrame) -> tuple[int, int, in
 
 def main() -> None:
     df = gsheet2df("112rq_5qilRHtYUFnFwpjDQeF4XKyTdY6qJhIwAnykN8", "Sheet1", 1)
-    umbrella = Path("/Volumes/MarcBusche/Alex/Reactivations/")
-    lfp_files = list(umbrella.rglob("*.lf.bin"))
+    lfp_files = list(KILOSORT_UMBRELLA.rglob("*.lf.bin"))
     assert len(lfp_files) > 0, "No LFP files found"
 
     for lfp_file in lfp_files:
@@ -171,20 +203,17 @@ def main() -> None:
             print(f"Skipping {lfp_file.name} due to data issues")
             continue
 
-        try:
-            ca1_low, ca1_high, rsc_low, rsc_high = get_ca1_rsc_channels(lfp_file, df)
+        ca1_low, ca1_high, rsc_low, rsc_high = get_ca1_rsc_channels(lfp_file, df)
 
-            assert ca1_low < ca1_high < rsc_low < rsc_high
-            assert 30 <= ca1_high - ca1_low <= 70
-            assert 80 <= rsc_high - rsc_low <= 120
+        assert ca1_low < ca1_high < rsc_low < rsc_high
+        assert 30 <= ca1_high - ca1_low <= 70
+        assert 80 <= rsc_high - rsc_low <= 120
 
-            get_lfp_signatures(
-                lfp_path=lfp_file.parent,
-                region_channels=(ca1_low, ca1_high, rsc_low, rsc_high),
-            )
-        except Exception as e:
-            print(f"Error processing {lfp_file.name}:")
-            traceback.print_exc()  # prints the full traceback
+        get_lfp_signatures(
+            lfp_path=lfp_file.parent,
+            region_channels=(ca1_low, ca1_high, rsc_low, rsc_high),
+            session_type="conditioning",
+        )
 
 
 def plot_ripple_results():

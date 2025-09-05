@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Literal
 import numpy as np
 
 from ripples.ripple_detection import (
@@ -71,6 +72,7 @@ def detect_ripples(
     data_folder: Path,
     sampling_rate_lfp: float,
     lfp: np.ndarray,
+    session_type: Literal["conditioning", "resting", "tones"],
 ) -> None:
     ca1_lfp = lfp[ca1_low:ca1_high, :]
 
@@ -93,11 +95,12 @@ def detect_ripples(
     resting_ind = np.repeat(True, common_average_referenced.shape[1])
 
     candidate_events = get_candidate_ripples(
-        common_average_referenced,
-        detection_channels_ca1,
-        resting_ind,
-        sampling_rate_lfp,
-        DETECTION_METHOD,
+        lfp_det_chans=common_average_referenced,
+        detection_channels_ca1=detection_channels_ca1,
+        resting_ind=resting_ind,
+        resting_ind_strict=resting_ind,
+        sampling_rate=sampling_rate_lfp,
+        detection_method=DETECTION_METHOD,
     )
 
     # Flattening makes further processing easier
@@ -113,17 +116,32 @@ def detect_ripples(
 
     freq_check, CAR_check, SRP_check, CAR_check_lr, SRP_check_lr, ripples = (
         get_quality_metrics(
-            ripples, common_average_referenced, common_average, sampling_rate_lfp
+            candidate_events=ripples,
+            lfp=common_average_referenced,
+            common_average=common_average,
+            sampling_rate=sampling_rate_lfp,
+            detection_channels_ca1=detection_channels_ca1,
         )
     )
 
-    lfp_state_idx = get_lfp_index_sleep_state(
-        data_folder=data_folder,
-        # This mouse was done with buffering rather than streaming.
-        # Need to remove ripples past the 30 minute mark below
-        n_samples=lfp.shape[1] if mouse != "00053" else 30 * 60 * sampling_rate_lfp,
-        sampling_rate_lfp=sampling_rate_lfp,
-    )
+    if session_type != "conditioning":
+        lfp_state_idx = get_lfp_index_sleep_state(
+            data_folder=data_folder,
+            # This mouse was done with buffering rather than streaming.
+            # Need to remove ripples past the 30 minute mark below
+            n_samples=lfp.shape[1] if mouse != "00053" else 30 * 60 * sampling_rate_lfp,
+            sampling_rate_lfp=sampling_rate_lfp,
+        )
+        ripple_state = []
+        for ripple in ripples:
+            for state, idxs in lfp_state_idx.items():
+                if ripple.peak_idx in idxs:
+                    ripple_state.append(state)
+                    break
+    else:
+        ripple_state = ["awake"] * len(ripples)
+
+    assert len(ripple_state) == len(ripples)
 
     if mouse == "00053":
         ripples = [
@@ -131,16 +149,6 @@ def detect_ripples(
             for ripple in ripples
             if ripple.peak_idx < 30 * 60 * sampling_rate_lfp
         ]
-
-    ripple_state = []
-
-    for ripple in ripples:
-        for state, idxs in lfp_state_idx.items():
-            if ripple.peak_idx in idxs:
-                ripple_state.append(state)
-                break
-
-    assert len(ripple_state) == len(ripples)
 
     total_passing_all = np.sum(
         np.array(freq_check) & np.array(CAR_check_lr) & np.array(SRP_check_lr)
@@ -155,13 +163,17 @@ def detect_ripples(
             lfp.shape[1] / sampling_rate_lfp if mouse != "00053" else 30 * 60
         ),
         state=ripple_state,
-        state_lengths={state: len(list(idxs)) for state, idxs in lfp_state_idx.items()},
+        state_lengths=(
+            {state: len(list(idxs)) for state, idxs in lfp_state_idx.items()}
+            if session_type != "conditioning"
+            else {"awake": lfp.shape[1] / sampling_rate_lfp}
+        ),
     )
 
     print(f"Total ripples passing all quality metrics: {total_passing_all}")
     print(f"Ripple rate {total_passing_all / (lfp.shape[1] / sampling_rate_lfp)}")
     with open(
-        HERE / "results" / "ripples" / f"{mouse}_{imec}.json",
+        HERE / "results" / "ripples" / f"{mouse}_{imec}_{session_type}.json",
         "w",
     ) as f:
         json.dump(cache_result.model_dump(), f)
