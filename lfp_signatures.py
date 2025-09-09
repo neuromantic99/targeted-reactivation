@@ -212,7 +212,7 @@ def main() -> None:
         get_lfp_signatures(
             lfp_path=lfp_file.parent,
             region_channels=(ca1_low, ca1_high, rsc_low, rsc_high),
-            session_type="conditioning",
+            session_type="resting",
         )
 
 
