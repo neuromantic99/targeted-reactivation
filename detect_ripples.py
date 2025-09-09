@@ -156,9 +156,11 @@ def detect_ripples(
 
     cache_result = RipplesCache(
         candidate_events=ripples,
-        common_average_reference_check=CAR_check_lr,
+        common_average_reference_check=CAR_check,
+        common_average_reference_check_less_restrictive=CAR_check_lr,
         frequency_check=freq_check,
-        super_ripple_check=SRP_check_lr,
+        super_ripple_check=SRP_check,
+        super_ripple_check_less_restrictive=SRP_check_lr,
         length_recording=(
             lfp.shape[1] / sampling_rate_lfp if mouse != "00053" else 30 * 60
         ),
