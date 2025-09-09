@@ -16,7 +16,7 @@ from ripples.utils import (
 
 from ripples.models import CandidateEvent
 
-from consts import DETECTION_METHOD, RIPPLE_BAND
+from consts import DETECTION_METHOD, RIPPLE_BAND, RIPPLE_PATH
 from models import RipplesCache
 from utils import get_lfp_index_sleep_state
 
@@ -114,6 +114,13 @@ def detect_ripples(
 
     print(f"Number of ripples after removing duplicates: {len(ripples)}")
 
+    if mouse == "00053":
+        ripples = [
+            ripple
+            for ripple in ripples
+            if ripple.peak_idx < 30 * 60 * sampling_rate_lfp
+        ]
+
     freq_check, CAR_check, SRP_check, CAR_check_lr, SRP_check_lr, ripples = (
         get_quality_metrics(
             candidate_events=ripples,
@@ -175,7 +182,7 @@ def detect_ripples(
     print(f"Total ripples passing all quality metrics: {total_passing_all}")
     print(f"Ripple rate {total_passing_all / (lfp.shape[1] / sampling_rate_lfp)}")
     with open(
-        HERE / "results" / "ripples" / f"{mouse}_{imec}_{session_type}.json",
+        RIPPLE_PATH / f"{mouse}_{imec}_{session_type}.json",
         "w",
     ) as f:
         json.dump(cache_result.model_dump(), f)

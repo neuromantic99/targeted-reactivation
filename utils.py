@@ -6,7 +6,7 @@ import numpy as np
 import cv2
 import pandas as pd
 
-from consts import KILOSORT_UMBRELLA
+from consts import KILOSORT_UMBRELLA, SERVER_PATH
 from data_import import Session
 from models import LED, Sound
 from rsync import Rsync_aligner
@@ -155,9 +155,7 @@ def process_sleep_spreadsheet(data_path: Path) -> Tuple[np.ndarray, np.ndarray]:
 
     mouse = data_path.parts[-1]
 
-    spreadsheet_path = Path(
-        "/Volumes/MarcBusche/Alex/Reactivations/Sleep Scoring/results"
-    )
+    spreadsheet_path = Path(SERVER_PATH / "Alex/Reactivations/Sleep Scoring/results")
 
     spreadsheets = list(spreadsheet_path.glob(f"*.xlsx"))
     mouse_sheets = [

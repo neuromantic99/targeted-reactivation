@@ -16,7 +16,7 @@ import traceback
 from npyx import extract_rawChunk, read_metadata
 
 from ripples.utils_npyx import load_sync_npyx
-from consts import KILOSORT_UMBRELLA, LFP_SYNC_FOLDER, LOCAL_SSD
+from consts import KILOSORT_UMBRELLA, LFP_SYNC_FOLDER, LOCAL_SSD, RIPPLE_PATH
 from detect_ripples import detect_ripples
 from detect_slow_oscillations import detect_slow_oscillations
 from detect_spindles import detect_spindles
@@ -49,8 +49,8 @@ def get_lfp_signatures(
     mouse = lfp_path.parent.parent.name
     imec = f"imec_{str(lfp_path).split('imec')[1]}"
 
-    if (HERE / "results" / "slow_oscillations" / f"{mouse}_{imec}.json").exists():
-        print(f"Slow oscillation results for {mouse}_{imec} already exist, skipping.")
+    if (RIPPLE_PATH / f"{mouse}_{imec}_{session_type}.json").exists():
+        print(f"Ripple results for {mouse}_{imec} already exist, skipping.")
         return
 
     ca1_low, ca1_high, rsc_low, rsc_high = region_channels
