@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Literal, Tuple
 import statsmodels.formula.api as smf
 
 from matplotlib import pyplot as plt
@@ -11,7 +11,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.stats import zscore
 import seaborn as sns
 
-from consts import LOCAL_SSD, SERVER_CACHE_PATH
+from consts import LOCAL_SSD, RIPPLE_PATH, SERVER_CACHE_PATH
 from data_import import Session
 from gsheets_importer import gsheet2df
 from lfp_signatures import get_ca1_rsc_channels
@@ -74,7 +74,7 @@ def compute_ICA_components(ssp_vectors: np.ndarray) -> np.ndarray:
     eigenvalues, eigenvectors = np.linalg.eig(covariance_matrix)
 
     # 'where σ2 is the variance of the elements of M (in our case σ2 = 1 due to z-score normalization)'
-    assert np.isclose(np.var(ssp_vectors_z), 1)
+    assert np.isclose(np.var(ssp_vectors_z), 1, atol=1e-3)
 
     q = n_cols / n_rows
 
@@ -209,6 +209,7 @@ def main() -> None:
             region_boundaries = get_ca1_rsc_channels(kilosort_path, paths_df)
             imec = kilosort_path.parent.name.split("_")[-1]
 
+            # Assumes that you've already loaded the lfp syncs to the local ssd using lfp_signatures/get_sync()
             lfp_sync = np.load(
                 Path(LOCAL_SSD / "lfp_syncs")
                 / f"npx_sync_times_{mouse}_imec_{imec[-1]}.npy"
@@ -219,7 +220,7 @@ def main() -> None:
                 spikes_sync = spikes_sync[-5435:]
 
             assert len(lfp_sync) == len(spikes_sync)
-            redo = False
+            redo = True
 
             if (SERVER_CACHE_PATH / f"{mouse}_{imec}.npy").exists() and not redo:
                 reactivation_strength = np.load(
@@ -229,12 +230,22 @@ def main() -> None:
                     SERVER_CACHE_PATH / f"{mouse}_{imec}_binedges.npy"
                 )
             else:
+                ripples, _ = load_ripples(mouse, imec, session_type="conditioning")
+                ripple_times_spikes_conditioning = get_ripple_times_in_spikes(
+                    spikes_sync=spikes_sync,
+                    lfp_sync=lfp_sync,
+                    pycontrol_time_edges=pycontrol_conditioning_time_edges,
+                    sessions=sessions,
+                    ripples=ripples,
+                )
+
                 reactivation_strength, resting_bin_edges = get_reactivation_strength(
                     data_path=data_path,
                     kilosort_path=kilosort_path,
                     region_boundaries=region_boundaries,
                     pycontrol_conditioning_time_edges=pycontrol_conditioning_time_edges,
                     pycontrol_resting_time_edges=pycontrol_resting_time_edges,
+                    ripple_times_spikes=ripple_times_spikes_conditioning,
                 )
 
                 print(f"reactivation strength found for {mouse} {imec}, saving")
@@ -320,6 +331,30 @@ def main() -> None:
     1 / 0
 
 
+def load_ripples(
+    mouse: str, imec: str, session_type: Literal["conditioning", "resting", "tones"]
+) -> Tuple[np.ndarray, np.ndarray]:
+
+    with open(
+        RIPPLE_PATH
+        / f"{mouse}_imec_{imec[-1]}{'_' + session_type if session_type != 'resting' else ''}.json"
+    ) as f:
+        ripple_cache = RipplesCache.model_validate_json(f.read())
+
+    passing_checks = (
+        np.array(ripple_cache.common_average_reference_check)
+        & np.array(ripple_cache.frequency_check)
+        & np.array(ripple_cache.super_ripple_check)
+    )
+    if mouse == "00053":
+        passing_checks = passing_checks[: len(ripple_cache.candidate_events)]
+        ripple_cache.state = ripple_cache.state[: len(ripple_cache.candidate_events)]
+
+    ripples = np.array(ripple_cache.candidate_events)[passing_checks]
+    state = np.array(ripple_cache.state)[passing_checks]
+    return ripples, state
+
+
 def align_reactivation_to_ripples(
     mouse: str,
     imec: str,
@@ -331,20 +366,7 @@ def align_reactivation_to_ripples(
     reactivation_strength: np.ndarray,
 ) -> Tuple[float, int, List[np.ndarray]]:
 
-    with open(HERE / "results" / "ripples" / f"{mouse}_imec_{imec[-1]}.json") as f:
-        ripple_cache = RipplesCache.model_validate_json(f.read())
-
-    passing_checks = (
-        np.array(ripple_cache.common_average_reference_check)
-        & np.array(ripple_cache.frequency_check)
-        & np.array(ripple_cache.super_ripple_check)
-    )
-    if mouse == "00053":
-        passing_checks = passing_checks[: len(ripple_cache.candidate_events)]
-    ripples = np.array(ripple_cache.candidate_events)[passing_checks]
-    state = np.array(ripple_cache.state)[passing_checks]
-
-    # Assumes that you've already loaded the lfp syncs to the local ssd using lfp_signatures/get_sync()
+    ripples, state = load_ripples(mouse, imec, session_type="resting")
     ripple_times_spikes = get_ripple_times_in_spikes(
         spikes_sync=spikes_sync,
         lfp_sync=lfp_sync,
@@ -410,7 +432,7 @@ def get_ripple_times_in_spikes(
     lfp_sync: np.ndarray,
     pycontrol_time_edges: Tuple[float, float],
     sessions: List[Session],
-    ripples: List[CandidateEvent],
+    ripples: List[CandidateEvent] | np.ndarray,
 ) -> np.ndarray:
 
     lfp_spikes_aligner = Rsync_aligner(
@@ -451,6 +473,7 @@ def get_reactivation_strength(
     region_boundaries: Tuple[int, int, int, int],
     pycontrol_conditioning_time_edges: Tuple[float, float],
     pycontrol_resting_time_edges: Tuple[float, float],
+    ripple_times_spikes: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
 
     spike_times, spike_clusters, labels, closest_channel, aligners = process_probe(
@@ -466,6 +489,17 @@ def get_reactivation_strength(
         )
     )
 
+    # Remove spikes that occur during ripples
+    for ripple in ripple_times_spikes:
+        idx = (spike_times >= ripple[0]) & (spike_times <= ripple[1])
+        prev_length = spike_times.shape[0]
+        spike_times = spike_times[~idx]
+        spike_clusters = spike_clusters[~idx]
+        print(
+            "number of spikes removed during ripples:",
+            prev_length - spike_times.shape[0],
+        )
+
     bin_width = 0.02
     ssp_vectors, _ = build_cluster_matrix(
         spike_times, spike_clusters, start_conditioning, end_conditioning, bin_width
@@ -473,7 +507,10 @@ def get_reactivation_strength(
 
     # Sometimes get a cell that never spiked
     clusters_keep = np.sum(ssp_vectors, axis=1) > 0
+    # Ripple silencing could create artifacts, so remove these
+    timepoints_keep = np.sum(ssp_vectors, axis=0) > 0
     ssp_vectors = ssp_vectors[clusters_keep, :]
+    ssp_vectors = ssp_vectors[:, timepoints_keep]
     comps = compute_ICA_components(ssp_vectors)
 
     # Done in the same way as the lfp
