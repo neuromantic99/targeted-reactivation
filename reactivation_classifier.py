@@ -370,8 +370,7 @@ def process_probe(
     Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, List[str]]]
     | Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[Rsync_aligner]]
 ):
-    """If bin_data is set to true, you'll get a trial by trial array of binned data. Otherwise you'll get the spike times etc
-    and the aligners.
+    """If bin_data is set to true, you'll get a trial by trial array of binned data. Otherwise you'll get the spike times etc and the aligners.
 
     I did this to hijack this function for spontaneous_reactivation. Should be refactored but oh well
 
@@ -1054,7 +1053,7 @@ def get_sleep_state(data_path: Path) -> np.ndarray:
 
 
 if __name__ == "__main__":
-    main()
+    # main()
     sleep_scores = np.load(
         HERE / "results" / f"mouse_sleep_scores.npy", allow_pickle=True
     ).item()

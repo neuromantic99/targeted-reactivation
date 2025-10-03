@@ -1,5 +1,6 @@
 plots/
 *.png
+*.pkl
 *.npy
 *.json
 *.csv
