@@ -18,7 +18,7 @@ from consts import LOCAL_SSD, RIPPLE_PATH, SERVER_CACHE_PATH
 from data_import import Session
 from gsheets_importer import gsheet2df
 from lfp_signatures import get_ca1_rsc_channels
-from models import RipplesCache
+from models import RipplesCache, SpindleCache
 from plotting import shaded_line_plot
 from reactivation_classifier import process_probe
 from rsync import Rsync_aligner
@@ -29,11 +29,17 @@ from utils import (
     shuffle_rows,
     zero_same_region,
 )
+from scipy.stats import ttest_rel
 from ripples.models import CandidateEvent
 
 HERE = Path(__file__).parent
 sys.path.append(str(HERE.parent))
 sys.path.append(str(HERE.parent.parent))
+
+sns.set_context("talk")
+
+
+FIGURE_PATH = Path("/Volumes/MarcBusche/James/figures")
 
 
 def compute_pcc_scores(
@@ -347,6 +353,7 @@ def main() -> None:
                 sessions=sessions,
                 resting_bin_edges=resting_bin_edges,
                 reactivation_strength=reactivation_strength,
+                alignment_point="peak",
             )
 
             all_components.extend(components)
@@ -361,13 +368,21 @@ def main() -> None:
 
     np.save("all_mouse_ids.npy", np.array(mouse_ids_components))
 
-    plot_results(all_components, mouse_ids_components, resting_bin_edges)
+    plot_component_traces(all_components, mouse_ids_components, resting_bin_edges)
 
 
-def plot_results(all_components, mouse_id, resting_bin_edges):
+def plot_component_traces(all_components, mouse_id, resting_bin_edges):
+
+    nan_idx = np.any(np.isnan(all_components), axis=1)
+    all_components = np.array(all_components)[~nan_idx, :]
+    mouse_id = np.array(mouse_id)[~nan_idx]
+
     bin_size = resting_bin_edges[1] - resting_bin_edges[0]
     trial_size = (30_000 * 8) // bin_size
     x_axis = np.arange(-trial_size, trial_size) * bin_size / 30_000
+    peak_start = np.where(x_axis == -0.2)[0][0]
+    peak_end = np.where(x_axis == 0.2)[0][0]
+
     peak_start = np.where(x_axis == -0.2)[0][0]
     peak_end = np.where(x_axis == 0.2)[0][0]
 
@@ -389,7 +404,6 @@ def plot_results(all_components, mouse_id, resting_bin_edges):
         use_sqrt=True,
     )
     model_fit = model.fit(reml=True)
-    # assert model_fit.converged
     print(model_fit.summary())
     wt_results = np.array(
         [comp for idx, comp in enumerate(all_components) if mouse_id[idx][:3] == "000"]
@@ -397,10 +411,30 @@ def plot_results(all_components, mouse_id, resting_bin_edges):
     nlgf_results = np.array(
         [comp for idx, comp in enumerate(all_components) if mouse_id[idx][:3] != "000"]
     )
+    # wt_results = gaussian_filter1d(wt_results, sigma=2, axis=1)
+    # nlgf_results = gaussian_filter1d(nlgf_results, sigma=2, axis=1)
+
+    colors = sns.color_palette(n_colors=2)
+    palette = {"WT": colors[0], "NLGF": colors[1]}
 
     plt.figure()
-    shaded_line_plot(wt_results, x_axis=x_axis, color="blue", label="WT")
-    shaded_line_plot(nlgf_results, x_axis=x_axis, color="red", label="NLGF")
+    shaded_line_plot(wt_results, x_axis=x_axis, color=palette["WT"], label="WT")
+    shaded_line_plot(
+        nlgf_results, x_axis=x_axis, color=palette["NLGF"], label="NLGF/S305N"
+    )
+
+    x_lim = (-2, 2)
+
+    plt.legend()
+    plt.xlabel("Time from ripple peak (s)")
+    plt.ylabel("Reactivation strength (z-score)")
+    plt.xlim(x_lim)
+    sns.despine()
+    plt.title("Mean component traces")
+    plt.tight_layout()
+    plt.savefig(
+        FIGURE_PATH / "spontaneous_reactivation" / "mean_components.png", dpi=300
+    )
 
     plt.figure()
 
@@ -421,23 +455,55 @@ def plot_results(all_components, mouse_id, resting_bin_edges):
     # sns.boxplot(data=df, x="genotype", y="result")
 
     plt.figure()
+
+    labelled = False
     for comp in wt_results:
         plt.plot(
             x_axis,
             comp,
-            color="blue",
-            alpha=0.2,
+            color=colors[0],
+            alpha=0.5,
+            label="WT" if not labelled else None,
         )
+        labelled = True
 
+    labelled = False
     for comp in nlgf_results:
         plt.plot(
             x_axis,
             comp,
-            color="red",
-            alpha=0.2,
+            color=colors[1],
+            alpha=0.5,
+            label="NLGF/S305N" if not labelled else None,
         )
+        labelled = True
+
+    plt.legend()
+
+    plt.xlabel("Time from ripple peak (s)")
+    plt.ylabel("Reactivation strength (z-score)")
+    plt.xlim(-0.5, 0.5)
+    sns.despine()
+    plt.title("All component traces")
+    plt.tight_layout()
+    plt.savefig(
+        FIGURE_PATH / "spontaneous_reactivation" / "all_components.png", dpi=300
+    )
 
     1 / 0
+
+
+def load_spindles(
+    mouse: str,
+    imec: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+
+    spindle_path = HERE / "results" / "spindles"
+
+    with open(spindle_path / f"{mouse}_imec_{imec[-1]}.json") as f:
+        spindle_cache = SpindleCache.model_validate_json(f.read())
+
+    return spindle_cache.spindles, spindle_cache.state
 
 
 def load_ripples(
@@ -470,9 +536,12 @@ def align_reactivation_to_ripples(
     sessions: List[Session],
     resting_bin_edges: np.ndarray,
     reactivation_strength: np.ndarray,
-) -> Tuple[float, int, List[np.ndarray]]:
+    alignment_point: Literal["onset", "peak"],
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
 
+    # reactivation_strength = np.mean(reactivation_strength, axis=0, keepdims=True)
     ripples, state = load_ripples(mouse, imec, session_type="resting")
+    # ripples, state = load_spindles(mouse, imec)
     ripple_times_spikes = get_ripple_times_in_spikes(
         spikes_sync=spikes_sync,
         lfp_sync=lfp_sync,
@@ -493,7 +562,9 @@ def align_reactivation_to_ripples(
         if state[idx] not in ["nrem", "awake"]:
             continue
 
-        closest_bin = np.argmin(np.abs(resting_bin_edges - r[0]))
+        closest_bin = np.argmin(
+            np.abs(resting_bin_edges - r[0 if alignment_point == "onset" else 2])
+        )
         if (
             closest_bin - trial_size < 0
             or closest_bin + trial_size > resting_bin_edges.shape[0]
@@ -521,6 +592,9 @@ def align_reactivation_to_ripples(
         f"{mouse} {imec} number nrem trials: {n_rem_trials.shape[0]}. number awake trials: {awake_trials.shape[0]}"
     )
 
+    if len(n_rem_trials) < 1:
+        return np.array([]), np.array([])
+
     components = []
     raw_components = []
     for component in range(n_rem_trials.shape[1]):
@@ -531,7 +605,8 @@ def align_reactivation_to_ripples(
         # zscore the whole (n_ripples, n_time) block
         zdata = (assembly_data - mean) / std
         # average across ripples -> one trace per assembly
-        components.append(np.abs(zdata.mean(axis=0)))
+        # components.append(np.abs(zdata.mean(axis=0)))
+        components.append(zdata.mean(axis=0))
         raw_components.append(zdata)
     return components, raw_components
 
@@ -635,8 +710,7 @@ def get_reactivation_strength(
     timepoints_keep = np.sum(ssp_vectors, axis=0) > 0
     ssp_vectors = ssp_vectors[clusters_keep, :]
     ssp_vectors = ssp_vectors[:, timepoints_keep]
-    comps = compute_ICA_components(ssp_vectors)
-    cluster_regions = cluster_regions[clusters_keep]
+    # comps = compute_ICA_components(ssp_vectors)
 
     # Done in the same way as the lfp
     start_rest, end_rest = aligners[1].B_to_A(
@@ -646,6 +720,7 @@ def get_reactivation_strength(
     reactivation, resting_bin_edges = build_cluster_matrix(
         spike_times, spike_clusters, start_rest, end_rest, bin_width
     )
+    return reactivation, resting_bin_edges
 
     reactivation = reactivation[clusters_keep, :]
 
@@ -686,9 +761,13 @@ def build_cluster_matrix(
     return np.array(matrix), bin_edges
 
 
-def explore_components() -> None:
+def fraction_positive_negative() -> None:
     with open("all_raw_components.pkl", "rb") as f:
-        all_components = pickle.load(f)
+        all_raw_components = pickle.load(f)
+    with open("all_components.pkl", "rb") as f:
+        all_components = np.array(pickle.load(f))
+
+    resting_bin_edges = np.load(SERVER_CACHE_PATH / "00053_imec0_binedges.npy")
     mouse_id = np.load("all_mouse_ids.npy")
 
     assert len(mouse_id) == len(all_components)
@@ -696,68 +775,154 @@ def explore_components() -> None:
     bin_size = 600
     trial_size = (30_000 * 8) // bin_size
     x_axis = np.arange(-trial_size, trial_size) * bin_size / 30_000
-    onset = np.where(x_axis == -0.1)[0][0]
-    offset = np.where(x_axis == 0.1)[0][0]
+    ripple_start = np.where(x_axis == -0.1)[0][0]
+    ripple_end = np.where(x_axis == 0.1)[0][0]
+    baseline_start = np.where(x_axis == -2)[0][0]
+    baseline_end = np.where(x_axis == -1)[0][0]
 
-    fraccys = []
+    positives = []
+    negatives = []
+    for component in all_raw_components:
+        ripple_response = component[:, ripple_start:ripple_end]
+        baseline_response = component[:, baseline_start:baseline_end]
+        # assert ripple_response.shape == baseline_response.shape
+        p_values = ttest_ind(ripple_response, baseline_response, axis=1).pvalue
+        direction = np.sign(
+            np.mean(ripple_response, axis=1) - np.mean(baseline_response, axis=1)
+        )
 
-    for comp in all_components:
-        baseline = comp[:, :onset]
-        peak = comp[:, onset:offset]
-        diff_all_ripples = np.abs(peak.mean(axis=1) - baseline.mean(axis=1))
-        fraction_over = np.sum(diff_all_ripples > 1) / diff_all_ripples.shape[0]
-        fraccys.append(fraction_over)
-
-    wt_result = [f for f, m in zip(fraccys, mouse_id) if m[:3] == "000"]
-    nlgf_result = [f for f, m in zip(fraccys, mouse_id) if m[:3] != "000"]
-
-    fraccys = np.array(fraccys)
+        significant_positive = np.sum((p_values < 0.05) & (direction > 0))
+        significant_negative = np.sum((p_values < 0.05) & (direction < 0))
+        positives.append(significant_positive / component.shape[0])
+        negatives.append(significant_negative / component.shape[0])
+    positives = np.array(positives)
+    negatives = np.array(negatives)
 
     df = pd.DataFrame(
         {
-            "result": fraccys,
+            "positive": positives,
+            "negative": negatives,
             "mouse": mouse_id,
-            "genotype": ["WT" if m[:3] == "000" else "NLGF" for m in mouse_id],
+            "genotype": ["WT" if m[:3] == "000" else "NLGF/S305N" for m in mouse_id],
         }
     )
+    colors = sns.color_palette(n_colors=2)
 
-    model = smf.mixedlm(
-        "result ~ genotype",
+    fig, axes = plt.subplots(1, 2, sharey=True, figsize=(10, 5))
+
+    sns.boxplot(
+        data=df,
+        x="genotype",
+        y="positive",
+        showfliers=False,
+        color=colors[0],
+        ax=axes[0],
+        # palette=colors,
+    )
+    sns.stripplot(
+        data=df,
+        x="genotype",
+        y="positive",
+        dodge=True,
+        jitter=True,
+        size=3,
+        color=colors[0],
+        ax=axes[0],
+    )
+
+    sns.boxplot(
+        data=df,
+        x="genotype",
+        y="negative",
+        showfliers=False,
+        color=colors[0],
+        ax=axes[1],
+    )
+
+    sns.stripplot(
+        data=df,
+        x="genotype",
+        y="negative",
+        dodge=True,
+        jitter=True,
+        size=3,
+        color=colors[0],
+        ax=axes[1],
+    )
+    axes[0].set_title("Positive")
+    axes[1].set_title("Negative")
+    axes[0].set_ylabel("Fraction significant")
+    sns.despine()
+    plt.tight_layout()
+
+    mixed_effect_positive = smf.mixedlm(
+        "positive ~ genotype",
         df,
         groups=df["mouse"],
         use_sqrt=True,
     )
-    model_fit = model.fit(reml=True)
-    # assert model_fit.converged
-    print(model_fit.summary())
-
-    n, edges, _ = plt.hist(
-        wt_result,
-        50,
-        color="blue",
-        alpha=0.5,
-        label="WT",
+    mixed_effect_negative = smf.mixedlm(
+        "negative ~ genotype",
+        df,
+        groups=df["mouse"],
+        use_sqrt=True,
     )
 
-    plt.hist(
-        nlgf_result,
-        bins=edges,
-        color="red",
-        alpha=0.5,
-        label="NLGF",
+    mixed_effect_positive_fit = mixed_effect_positive.fit(reml=True)
+    mixed_effect_negative_fit = mixed_effect_negative.fit(reml=True)
+
+    print("Positive components mixed effect model:")
+    print(mixed_effect_positive_fit.summary())
+    print("Negative components mixed effect model:")
+    print(mixed_effect_negative_fit.summary())
+
+    # Add the pvalue to the top of the plots
+    axes[0].text(
+        0.5,
+        0.85,
+        f"p = {mixed_effect_positive_fit.pvalues['genotype[T.WT]']:.2g}",
+        ha="center",
+        va="bottom",
+        fontsize=14,
     )
-    # all_components = [
-    #     gaussian_filter1d(comp, sigma=30, axis=1) for comp in all_components
-    # ]
+    axes[1].text(
+        0.5,
+        0.85,
+        f"p = {mixed_effect_negative_fit.pvalues['genotype[T.WT]']:.2g}",
+        ha="center",
+        fontsize=14,
+        va="bottom",
+    )
+    plt.ylim(None, 0.95)
 
-    plt.figure()
-    plt.plot(x_axis, comp.T, color="gray", alpha=0.2)
-    plt.plot(x_axis, comp.mean(axis=0), color="black", linewidth=2)
-    1 / 0
-    # plt.xlim(380, 420)
+    # Draw a line under the pvalue joining the boxes
 
-    # plt.title(f"Mean: {comp.mean():.2f}, Std: {comp.std():.2f}"    1 / 0
+    axes[0].plot([0, 1], [0.83, 0.83], color="black", lw=1.5)
+    axes[1].plot([0, 1], [0.83, 0.83], color="black", lw=1.5)
+
+    # with a little vertical line at one end
+    axes[0].plot([0, 0], [0.81, 0.83], color="black", lw=1.5)
+    axes[0].plot([1, 1], [0.81, 0.83], color="black", lw=1.5)
+
+    axes[1].plot([0, 0], [0.81, 0.83], color="black", lw=1.5)
+    axes[1].plot([1, 1], [0.81, 0.83], color="black", lw=1.5)
+    SERVER_PATH = Path("/Volumes/MarcBusche/James/figures")
+    plt.savefig(
+        SERVER_PATH / "spontaneous_reactivation" / "positive_negative_components.png"
+    )
 
 
 if __name__ == "__main__":
-    main()
+
+    fraction_positive_negative()
+    # main()
+
+    # with open("all_components.pkl", "rb") as f:
+    #     all_components = pickle.load(f)
+
+    # with open("all_raw_components.pkl", "rb") as f:
+    #     all_raw_components = pickle.load(f)
+
+    # resting_bin_edges = np.load(SERVER_CACHE_PATH / "00053_imec0_binedges.npy")
+    # mouse_ids_components = np.load("all_mouse_ids.npy")
+    # plot_component_traces(all_components, mouse_ids_components, resting_bin_edges)

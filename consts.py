@@ -8,7 +8,8 @@ LFP_SYNC_FOLDER = LOCAL_SSD / "lfp_syncs"
 
 KILOSORT_UMBRELLA = SERVER_PATH / "Alex" / "Reactivations"
 SERVER_CACHE_PATH = Path(
-    SERVER_PATH / "James/caches/spontaneous_reactivation_strength_CA1"
+    SERVER_PATH
+    / "James/caches/spontaneous_reactivation_strength_CA1_again_for_some_reason"
 )
 RIPPLE_PATH = Path(SERVER_PATH / "James/caches/ripples")
 DETECTION_METHOD = "median"  # options 'median' or 'sd'
