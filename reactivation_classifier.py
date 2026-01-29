@@ -412,11 +412,11 @@ def process_probe(
         kilosort_path
     )
 
-    # idx_keep = ((closest_channel >= ca1_low) & (closest_channel <= ca1_high)) | (
-    #     (closest_channel >= rsc_low) & (closest_channel <= rsc_high)
-    # )
+    idx_keep = ((closest_channel >= ca1_low) & (closest_channel <= ca1_high)) | (
+        (closest_channel >= rsc_low) & (closest_channel <= rsc_high)
+    )
 
-    idx_keep = (closest_channel >= ca1_low) & (closest_channel <= ca1_high)
+    # idx_keep = (closest_channel >= ca1_low) & (closest_channel <= ca1_high)
 
     spike_times = spike_times[idx_keep]
     spike_clusters = spike_clusters[idx_keep]

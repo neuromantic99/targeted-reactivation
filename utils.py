@@ -313,3 +313,21 @@ def shuffle_rows(matrix):
     for row in shuffled_matrix:
         np.random.shuffle(row)  # Shuffle elements within the row
     return shuffled_matrix
+
+
+def zero_same_region(mat: np.ndarray, regions: np.ndarray) -> np.ndarray:
+    """
+    Zero out entries of `mat` (shape (n_cells, n_cells))
+    where row and column belong to the same region.
+
+    mat : np.ndarray
+        2D array of shape (n_cells, n_cells).
+    regions : np.ndarray
+        1D array of shape (n_cells,), with values 'ca1' or 'rsc'.
+    """
+
+    assert mat.shape[0] == mat.shape[1] == regions.shape[0]
+    same_region_mask = regions[:, None] == regions[None, :]
+    mat = mat.copy()
+    mat[same_region_mask] = 0
+    return mat
