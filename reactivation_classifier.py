@@ -40,12 +40,14 @@ from sklearn.feature_selection import SelectKBest, mutual_info_classif
 
 HERE = Path(__file__).parent
 
-FIGURE_PATH = HERE / "plots" / "classifier"
+FIGURE_PATH = Path("/Volumes/MarcBusche/James/figures")
 
 WT_COLOR = "#1f77b4"
 NLGF_COLOR = "#ff7f0e"
 
 SHUFFLED_COLOR = sns.color_palette("tab10")[2]
+
+sns.set_context("talk")
 
 
 def load_spiking_data(
@@ -416,7 +418,7 @@ def process_probe(
         (closest_channel >= rsc_low) & (closest_channel <= rsc_high)
     )
 
-    # idx_keep = (closest_channel >= ca1_low) & (closest_channel <= ca1_high)
+    idx_keep = (closest_channel >= ca1_low) & (closest_channel <= ca1_high)
 
     spike_times = spike_times[idx_keep]
     spike_clusters = spike_clusters[idx_keep]
@@ -870,6 +872,7 @@ def plot_boxplots(
     sleep: Dict[str, List[float]],
     shuffled: Dict[str, List[float]],
 ) -> None:
+
     wt_wake = []
     nlgf_wake = []
 
@@ -881,7 +884,6 @@ def plot_boxplots(
 
     for mouse in awake.keys():
 
-        ##############
         result = awake[mouse]
         result = np.array(result).reshape(
             int(np.sqrt(len(result))), int(np.sqrt(len(result)))
@@ -920,33 +922,197 @@ def plot_boxplots(
             else:
                 nlgf_shuffled.append(result_shuffle)
 
-    to_plot = {
-        "WT": [np.percentile(result, 95) for result in wt_wake],
-        "NLGF/S305N": [np.percentile(result, 95) for result in nlgf_wake],
-    }
+    to_plot = pd.DataFrame(
+        {
+            "Genotype": ["WT"] * len(wt_wake) + ["NLGF/S305N"] * len(nlgf_wake),
+            "Classifier score": [np.percentile(result, 95) for result in wt_wake]
+            + [np.percentile(result, 95) for result in nlgf_wake],
+        }
+    )
 
-    sns.boxplot(to_plot)
-    plt.title("95th percentile scores waking")
+    p_value = ttest_ind(
+        [np.percentile(result, 95) for result in wt_wake],
+        [np.percentile(result, 95) for result in nlgf_wake],
+    ).pvalue
 
-    to_plot = {
-        "WT": [np.percentile(result, 95) for result in wt_sleep],
-        "WT_Shuffled": [np.percentile(result, 95) for result in wt_shuffled],
-        "NLGF/S305N": [np.percentile(result, 95) for result in nlgf_sleep],
-        "NLGF/S305N_Shuffled": [np.percentile(result, 95) for result in nlgf_shuffled],
-    }
-    t_wt = ttest_ind(
+    colors = sns.color_palette(n_colors=2)
+
+    sns.boxplot(
+        data=to_plot,
+        x="Genotype",
+        y="Classifier score",
+        showfliers=False,
+        color=colors[0],
+        # palette=colors,
+    )
+    sns.stripplot(
+        data=to_plot,
+        x="Genotype",
+        y="Classifier score",
+        dodge=True,
+        jitter=True,
+        # size=3,
+        color=colors[0],
+        edgecolor="k",
+        linewidth=1,
+    )
+
+    plt.text(
+        0.5,
+        1.08,
+        f"p = {p_value:.2g}",
+        ha="center",
+        va="bottom",
+        fontsize=14,
+    )
+
+    plt.plot([0, 1], [1.07, 1.07], color="black", lw=1.5)
+    plt.plot([0, 0], [1.05, 1.07], color="black", lw=1.5)
+    plt.plot([1, 1], [1.05, 1.07], color="black", lw=1.5)
+
+    colors = sns.color_palette(n_colors=2)
+
+    plt.axhline(0.5, color="red", linestyle="--")
+    plt.text(1.02, 0.51, "Chance level", color="red", fontsize=12)
+
+    plt.title("Waking")
+
+    # add some space at the top for the significance bar
+    plt.ylim(None, 1.15)
+    sns.despine()
+    plt.tight_layout()
+    plt.savefig(FIGURE_PATH / "targeted" / "awake_boxplot.png", dpi=300)
+
+    df = pd.DataFrame(
+        {
+            "Genotype": ["WT"] * len(wt_sleep)
+            + ["WT\nShuffled"] * len(wt_shuffled)
+            + ["NLGF/S305N"] * len(nlgf_sleep)
+            + ["NLGF/S305N\nShuffled"] * len(nlgf_shuffled),
+            "Classifier score": [np.percentile(result, 95) for result in wt_sleep]
+            + [np.percentile(result, 95) for result in wt_shuffled]
+            + [np.percentile(result, 95) for result in nlgf_sleep]
+            + [np.percentile(result, 95) for result in nlgf_shuffled],
+        }
+    )
+    plt.figure(figsize=(10, 7))
+
+    t_wt_vs_shuffled = ttest_ind(
         [np.percentile(result, 95) for result in wt_sleep],
         [np.percentile(result, 95) for result in wt_shuffled],
     )
-    t_nlgf = ttest_ind(
+    t_nlgf_vs_shuffled = ttest_ind(
         [np.percentile(result, 95) for result in nlgf_sleep],
         [np.percentile(result, 95) for result in nlgf_shuffled],
     )
+    t_wt_vs_nlgf = ttest_ind(
+        [np.percentile(result, 95) for result in wt_sleep],
+        [np.percentile(result, 95) for result in nlgf_sleep],
+    )
 
-    plt.figure()
-    sns.boxplot(to_plot, showfliers=False)
-    sns.stripplot(to_plot)
-    plt.title(f"WT p={t_wt.pvalue:.3f}, NLGF/S305N p={t_nlgf.pvalue:.3f}")
+    palette = {
+        "WT": colors[0],
+        "WT\nShuffled": colors[0],
+        "NLGF/S305N": colors[1],
+        "NLGF/S305N\nShuffled": colors[1],
+    }
+
+    sns.boxplot(
+        data=df,
+        x="Genotype",
+        y="Classifier score",
+        showfliers=False,
+        palette=palette,
+    )
+    sns.stripplot(
+        data=df[df["Genotype"].isin(["WT", "NLGF/S305N"])],
+        x="Genotype",
+        y="Classifier score",
+        # dodge=True,
+        jitter=True,
+        # size=3,
+        edgecolor="k",
+        linewidth=1,
+        palette={
+            "WT": colors[0],
+            "NLGF/S305N": colors[1],
+        },
+    )
+    # Add all three p values as in the above plot
+    shuffled_y_pos = 0.67
+    nlgf_wt_y_pos = shuffled_y_pos + 0.019
+    text_from_line_offset = 0.0015
+    little_line_height = 0.003
+    plt.text(
+        0.5,
+        shuffled_y_pos + text_from_line_offset,
+        f"p = {t_wt_vs_shuffled.pvalue:.2g}",
+        ha="center",
+        va="bottom",
+        fontsize=14,
+    )
+
+    plt.plot([0, 1], [shuffled_y_pos, shuffled_y_pos], color="black", lw=1.5)
+    plt.plot(
+        [0, 0],
+        [shuffled_y_pos - little_line_height, shuffled_y_pos],
+        color="black",
+        lw=1.5,
+    )
+    plt.plot(
+        [1, 1],
+        [shuffled_y_pos - little_line_height, shuffled_y_pos],
+        color="black",
+        lw=1.5,
+    )
+    plt.text(
+        2.5,
+        shuffled_y_pos + text_from_line_offset,
+        f"p = {t_nlgf_vs_shuffled.pvalue:.2g}",
+        ha="center",
+        va="bottom",
+        fontsize=14,
+    )
+    plt.plot([2, 3], [shuffled_y_pos, shuffled_y_pos], color="black", lw=1.5)
+    plt.plot(
+        [2, 2],
+        [shuffled_y_pos - little_line_height, shuffled_y_pos],
+        color="black",
+        lw=1.5,
+    )
+    plt.plot(
+        [3, 3],
+        [shuffled_y_pos - little_line_height, shuffled_y_pos],
+        color="black",
+        lw=1.5,
+    )
+    plt.text(
+        1,
+        nlgf_wt_y_pos + text_from_line_offset,
+        f"p = {t_wt_vs_nlgf.pvalue:.2g}",
+        ha="center",
+        va="bottom",
+        fontsize=14,
+    )
+    plt.plot([0, 2], [nlgf_wt_y_pos, nlgf_wt_y_pos], color="black", lw=1.5)
+    plt.plot(
+        [0, 0],
+        [nlgf_wt_y_pos - little_line_height, nlgf_wt_y_pos],
+        color="black",
+        lw=1.5,
+    )
+    plt.plot(
+        [2, 2],
+        [nlgf_wt_y_pos - little_line_height, nlgf_wt_y_pos],
+        color="black",
+        lw=1.5,
+    )
+    plt.ylim(None, 0.72)
+
+    plt.title("NREM Sleep")
+    sns.despine()
+    plt.tight_layout()
+    plt.savefig(FIGURE_PATH / "targeted" / "sleep_boxplot.png", dpi=300)
 
 
 def plot_heatmap(mouse_scores: Dict[str, List[float]], title: str) -> None:

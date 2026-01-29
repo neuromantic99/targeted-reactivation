@@ -272,7 +272,7 @@ def get_lfp_index_sleep_state(
     return state_idxs
 
 
-def save_figure(name: str, path: Path):
+def save_figure(name: str, path: Path) -> None:
     plt.rcParams["pdf.fonttype"] = 42
     plt.savefig(path / f"{name}.pdf", bbox_inches="tight", transparent=True)
 
@@ -297,7 +297,7 @@ def build_path_dict() -> dict[str, list[Path]]:
     return path_dict
 
 
-def shuffle_rows(matrix):
+def shuffle_rows(matrix: np.ndarray) -> np.ndarray:
     """
     Shuffles the elements within each row of the given matrix independently.
 

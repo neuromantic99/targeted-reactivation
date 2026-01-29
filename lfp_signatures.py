@@ -845,6 +845,18 @@ def get_coupling_results():
 
 
 if __name__ == "__main__":
-    main()
-    # get_coupling_results()
+    # main()
+    get_coupling_results()
     # plot_spindle_results()
+
+    """
+    go through every ripple
+    is it between a spindle offset or onest or not
+    plot propertion for each animal.
+
+    Go through each spindle
+    does it contain a ripple or not
+    plot proportion for each animal.
+    
+    
+    """

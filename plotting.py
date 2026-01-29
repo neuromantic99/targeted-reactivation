@@ -104,8 +104,8 @@ def shaded_line_plot(
     color: str,
     label: str,
 ) -> None:
-    mean = np.mean(arr, 0)
-    sem = np.std(arr, 0) / np.sqrt(arr.shape[1])
+    mean = np.nanmean(arr, 0)
+    sem = np.nanstd(arr, 0) / np.sqrt(arr.shape[1])
     plt.plot(x_axis, mean, color=color, label=label, marker="", zorder=1)
     plt.fill_between(
         x_axis,
