@@ -22,7 +22,13 @@ from models import RipplesCache
 from plotting import shaded_line_plot
 from reactivation_classifier import process_probe
 from rsync import Rsync_aligner
-from utils import build_path_dict, get_aligners, get_data_paths, shuffle_rows
+from utils import (
+    build_path_dict,
+    get_aligners,
+    get_data_paths,
+    shuffle_rows,
+    zero_same_region,
+)
 from ripples.models import CandidateEvent
 
 HERE = Path(__file__).parent
@@ -152,6 +158,7 @@ def offline_reactivation(
     offline_activity_matrix: np.ndarray,
     ensemble_matrix: np.ndarray,
     do_shuffle: bool = False,
+    cluster_regions: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     For each component, b, of ICA ensemble matrix w, a
@@ -213,6 +220,14 @@ def offline_reactivation(
     # set diagonal to zero
     for b in range(projection_matrices.shape[0]):
         np.fill_diagonal(projection_matrices[b], 0)
+
+    projection_matrices = (
+        np.array(
+            [zero_same_region(mat, cluster_regions) for mat in projection_matrices]
+        )
+        if cluster_regions is not None
+        else projection_matrices
+    )
 
     reactivation_strength = contract(
         "ik,bkj,ji->bi",
@@ -296,13 +311,15 @@ def main() -> None:
                     ripples=ripples,
                 )
 
-                reactivation_strength, resting_bin_edges = get_reactivation_strength(
-                    data_path=data_path,
-                    kilosort_path=kilosort_path,
-                    region_boundaries=region_boundaries,
-                    pycontrol_conditioning_time_edges=pycontrol_conditioning_time_edges,
-                    pycontrol_resting_time_edges=pycontrol_resting_time_edges,
-                    ripple_times_spikes=ripple_times_spikes_conditioning,
+                reactivation_strength, resting_bin_edges, pcc_scores = (
+                    get_reactivation_strength(
+                        data_path=data_path,
+                        kilosort_path=kilosort_path,
+                        region_boundaries=region_boundaries,
+                        pycontrol_conditioning_time_edges=pycontrol_conditioning_time_edges,
+                        pycontrol_resting_time_edges=pycontrol_resting_time_edges,
+                        ripple_times_spikes=ripple_times_spikes_conditioning,
+                    )
                 )
 
                 print(f"reactivation strength found for {mouse} {imec}, saving")
@@ -315,6 +332,11 @@ def main() -> None:
                     SERVER_CACHE_PATH / f"{mouse}_{imec}_binedges",
                     resting_bin_edges,
                 )
+                np.save(
+                    SERVER_CACHE_PATH / f"{mouse}_{imec}_pcc_scores",
+                    pcc_scores,
+                )
+                continue
 
             components, raw_components = align_reactivation_to_ripples(
                 mouse=mouse,
@@ -561,7 +583,9 @@ def get_reactivation_strength(
     pycontrol_conditioning_time_edges: Tuple[float, float],
     pycontrol_resting_time_edges: Tuple[float, float],
     ripple_times_spikes: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+
+    ca1_low, ca1_high, rsc_low, rsc_high = region_boundaries
 
     spike_times, spike_clusters, labels, closest_channel, aligners = process_probe(
         data_path=data_path,
@@ -582,6 +606,7 @@ def get_reactivation_strength(
         prev_length = spike_times.shape[0]
         spike_times = spike_times[~idx]
         spike_clusters = spike_clusters[~idx]
+        closest_channel = closest_channel[~idx]
         print(
             "number of spikes removed during ripples:",
             prev_length - spike_times.shape[0],
@@ -592,6 +617,18 @@ def get_reactivation_strength(
         spike_times, spike_clusters, start_conditioning, end_conditioning, bin_width
     )
 
+    cluster_regions = []
+    for cluster_id in np.unique(spike_clusters):
+        closest_channel_cluster = closest_channel[spike_clusters == cluster_id][0]
+        if closest_channel_cluster >= ca1_low and closest_channel_cluster <= ca1_high:
+            cluster_regions.append("ca1")
+        elif closest_channel_cluster >= rsc_low and closest_channel_cluster <= rsc_high:
+            cluster_regions.append("rsc")
+        else:
+            raise ValueError("Cluster not in ca1 or rsc")
+
+    cluster_regions = np.array(cluster_regions)
+
     # Sometimes get a cell that never spiked
     clusters_keep = np.sum(ssp_vectors, axis=1) > 0
     # Ripple silencing could create artifacts, so remove these
@@ -599,6 +636,7 @@ def get_reactivation_strength(
     ssp_vectors = ssp_vectors[clusters_keep, :]
     ssp_vectors = ssp_vectors[:, timepoints_keep]
     comps = compute_ICA_components(ssp_vectors)
+    cluster_regions = cluster_regions[clusters_keep]
 
     # Done in the same way as the lfp
     start_rest, end_rest = aligners[1].B_to_A(
@@ -612,9 +650,16 @@ def get_reactivation_strength(
     reactivation = reactivation[clusters_keep, :]
 
     assert reactivation.shape[0] == ssp_vectors.shape[0]
-    reactivation_strength = offline_reactivation(reactivation, comps, do_shuffle=False)
+    reactivation_strength = offline_reactivation(
+        reactivation,
+        comps,
+        do_shuffle=False,
+        cluster_regions=cluster_regions,
+    )
 
-    return reactivation_strength, resting_bin_edges
+    pcc_scores = compute_pcc_scores(reactivation, comps)
+
+    return reactivation_strength, resting_bin_edges, pcc_scores
 
 
 def build_cluster_matrix(
