@@ -12,6 +12,8 @@ from scipy.ndimage import gaussian_filter1d
 import seaborn as sns
 import traceback
 
+import statsmodels.formula.api as smf
+
 
 from npyx import extract_rawChunk, read_metadata
 
@@ -342,6 +344,164 @@ def plot_ripple_results():
     p_values_df.to_csv(
         HERE / "results" / "ripples" / "ripple_p_values.csv", index=False
     )
+
+
+def plot_slow_oscillation_results_mixed_effects():
+    results_files = list(
+        Path("/Volumes/MarcBusche/James/Alex/lfp_signatures/slow_oscillations").glob(
+            "*.json"
+        )
+    )
+    data = {
+        "Genotype": [],
+        "mouse_id": [],
+        "Slow Oscillation rate (min$^{-1}$)": [],
+        "Slow Oscillation duration (ms)": [],
+        "Slow Oscillation amplitude (µV)": [],
+        "Sleep State": [],
+    }
+    for result_file in results_files:
+        if "medianRef" in str(result_file):
+            print(f"Skipping {result_file} due to medianRef")
+            continue
+        mouse = result_file.name.split("_")[0]
+        slow_cache = SlowOscillationCache.model_validate_json(result_file.read_text())
+        slow_starts = np.array(slow_cache.starts)
+        slow_ends = np.array(slow_cache.ends)
+        slow_states = np.array(slow_cache.state)
+
+        for state in np.unique(slow_states):
+            if state in {"transition", "rem"}:
+                continue
+            state_start = slow_starts[slow_states == state]
+            state_end = slow_ends[slow_states == state]
+            state_length = slow_cache.state_lengths[state] / 2500
+            n = len(state_start)
+            data["Genotype"].extend(["WT" if mouse[:3] == "000" else "NLGF/S305N"] * n)
+            data["mouse_id"].extend([mouse] * n)
+            data["Sleep State"].extend([state] * n)
+            data["Slow Oscillation rate (min$^{-1}$)"].extend(
+                [(len(state_start) / state_length) * 60] * n
+            )
+            data["Slow Oscillation duration (ms)"].extend(
+                [
+                    ((end - start) / 2500) * 1000
+                    for start, end in zip(state_start, state_end)
+                ]
+            )
+            data["Slow Oscillation amplitude (µV)"].extend(
+                [
+                    max(
+                        slow_cache.downsampled_lfp[
+                            start
+                            // slow_cache.downsample_factor : end
+                            // slow_cache.downsample_factor
+                        ]
+                    )
+                    - min(
+                        slow_cache.downsampled_lfp[
+                            start
+                            // slow_cache.downsample_factor : end
+                            // slow_cache.downsample_factor
+                        ]
+                    )
+                    for start, end in zip(state_start, state_end)
+                ]
+            )
+
+    df = pd.DataFrame(data)
+    sns.boxplot(
+        df,
+        x="Sleep State",
+        y="Slow Oscillation amplitude (µV)",
+        hue="Genotype",
+        showfliers=False,
+    )
+
+    mixed_effects = smf.mixedlm(
+        "Q('Slow Oscillation amplitude (µV)') ~ Q('Sleep State') * Genotype",
+        data=df,
+        groups=df["mouse_id"],
+    ).fit()
+    assert mixed_effects.converged, "Mixed effects model did not converge"
+
+    df_nrem = df[df["Sleep State"] == "nrem"]
+    df_nrem["Slow Oscillation amplitude (µV)"] = np.log10(
+        df_nrem["Slow Oscillation amplitude (µV)"]
+    )
+    mixed_effects_nrem = smf.mixedlm(
+        "Q('Slow Oscillation amplitude (µV)') ~ Genotype",
+        data=df_nrem,
+        groups=df_nrem["mouse_id"],
+    ).fit()
+
+    plt.figure()
+    sns.boxplot(df_nrem, x="Genotype", y="Slow Oscillation amplitude (µV)")
+
+    # print(mixed_effects.summary())
+    print(mixed_effects_nrem.summary())
+
+
+def plot_spindle_results_mixed_effects():
+    results_files = list(
+        Path("/Volumes/MarcBusche/James/Alex/lfp_signatures/spindles").glob("*.json")
+    )
+    data = {
+        "Genotype": [],
+        "mouse_id": [],
+        "Spindle duration (ms)": [],
+        "Spindle amplitude (µV)": [],
+        "Sleep State": [],
+    }
+    for result_file in results_files:
+        mouse = result_file.name.split("_")[0]
+        spindle_cache = SpindleCache.model_validate_json(result_file.read_text())
+        spindles = np.array(spindle_cache.spindles)
+        spindle_states = np.array(spindle_cache.state)
+
+        for state in np.unique(spindle_states):
+            if state in {"transition", "rem"}:
+                continue
+            state_spindles = spindles[spindle_states == state]
+            n = len(state_spindles)
+
+            data["Genotype"].extend(["WT" if mouse[:3] == "000" else "NLGF/S305N"] * n)
+            data["mouse_id"].extend([mouse] * n)
+            data["Sleep State"].extend([state] * n)
+            data["Spindle duration (ms)"].extend(
+                [
+                    ((spindle.offset - spindle.onset) / 2500) * 1000
+                    for spindle in state_spindles
+                ]
+            )
+
+            data["Spindle amplitude (µV)"].extend(
+                [spindle.peak_amplitude for spindle in state_spindles]
+            )
+
+    df = pd.DataFrame(data)
+    sns.boxplot(df, x="Sleep State", y="Spindle amplitude (µV)", hue="Genotype")
+
+    mixed_effects = smf.mixedlm(
+        "Q('Spindle amplitude (µV)') ~ Q('Sleep State') * Genotype",
+        data=df,
+        groups=df["mouse_id"],
+    ).fit()
+    assert mixed_effects.converged, "Mixed effects model did not converge"
+
+    df_nrem = df[df["Sleep State"] == "nrem"]
+    df_nrem["Spindle amplitude (µV)"] = np.log10(df_nrem["Spindle amplitude (µV)"])
+    mixed_effects_nrem = smf.mixedlm(
+        "Q('Spindle amplitude (µV)') ~ Genotype",
+        data=df_nrem,
+        groups=df_nrem["mouse_id"],
+    ).fit(do_sqrt=False)
+
+    plt.figure()
+    sns.boxplot(df_nrem, x="Genotype", y="Spindle amplitude (µV)")
+
+    # print(mixed_effects.summary())
+    print(mixed_effects_nrem.summary())
 
 
 def plot_spindle_results():
@@ -1031,11 +1191,13 @@ def get_coupling_results():
 
 
 if __name__ == "__main__":
-    main()
+    # main()
     # get_coupling_results()
+    # plot_spindle_results_mixed_effects()
     # plot_spindle_results()
     # plot_slow_oscillation_results()
-    get_coupling_results_proportion()
+    # get_coupling_results_proportion()
+    plot_slow_oscillation_results_mixed_effects()
 
     """
     go through every ripple
