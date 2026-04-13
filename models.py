@@ -20,10 +20,10 @@ class LED:
 class RipplesCache(BaseModel):
     candidate_events: List[CandidateEvent]
     common_average_reference_check: List[bool]
-    common_average_reference_check_less_restrictive: List[bool]
+    # common_average_reference_check_less_restrictive: List[bool]
     frequency_check: List[bool]
     super_ripple_check: List[bool]
-    super_ripple_check_less_restrictive: List[bool]
+    # super_ripple_check_less_restrictive: List[bool]
     length_recording: float
     state: List[str]
     state_lengths: dict[str, float]
@@ -48,6 +48,6 @@ class SlowOscillationCache(BaseModel):
     starts: List[int]
     ends: List[int]
     state: List[str]
-    state_lengths: dict[str, float]
+    state_lengths: dict[st, float]
     downsampled_lfp: List[float]
     downsample_factor: int
