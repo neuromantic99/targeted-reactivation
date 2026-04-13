@@ -31,8 +31,11 @@ def detect_spindles(
     # The mean across all channels was subtracted (common average reference) and the
     # mean across all times was subtracted from each channel to normalise
     lfp = lfp[rsc_low:rsc_high, :]
-    common_average_time = np.mean(lfp, axis=0)
-    lfp = np.subtract(lfp, common_average_time)
+
+    # Commented out due to Suraya change
+    # common_average_time = np.mean(lfp, axis=0)
+    # lfp = np.subtract(lfp, common_average_time)
+
     common_average_channel = np.mean(lfp, axis=1)
     lfp = np.subtract(lfp, common_average_channel[:, np.newaxis])
 
@@ -41,6 +44,8 @@ def detect_spindles(
     # band was selected for spindle detection.
     sigma_filtered = bandpass_filter(lfp, 10, 16, sampling_rate_lfp, order=2)
     max_power_channel = np.argmax(compute_power(sigma_filtered))
+    assert max_power_channel != max_power_channel + rsc_low, "Max power channel is the reference"
+
 
     # The filtered signal from this channel then underwent a Hilbert transform, and the absolute value of this was
     # taken as a proxy for instantaneous amplitude, or power. Candidate spindle events were identified where the
@@ -106,7 +111,7 @@ def detect_spindles(
     )
 
     with open(
-        HERE / "results" / "spindles" / f"{mouse}_{imec}.json",
+        Path("/mnt/MarcBusche/James/Alex/lfp_signatures/spindles") / f"{mouse}_{imec}.json",
         "w",
     ) as f:
         json.dump(cache_result.model_dump(), f)
