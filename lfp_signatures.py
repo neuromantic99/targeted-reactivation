@@ -89,6 +89,7 @@ def get_lfp_signatures(
         print("loading existing LFP chunk")
         lfp = np.load(lfp_chunk_path)
     else:
+        # raise ValueError("Expect this to be done for now")
         frame_triggers = np.load(
             frame_trigger_times[0]
             if session_type == "conditioning"
@@ -141,16 +142,16 @@ def get_lfp_signatures(
     #     imec=imec,
     # )
 
-    detect_ripples(
-        mouse,
-        imec,
-        ca1_low,
-        ca1_high,
-        data_folder,
-        sampling_rate_lfp,
-        lfp,
-        session_type=session_type,
-    )
+    # detect_ripples(
+    #     mouse,
+    #     imec,
+    #     ca1_low,
+    #     ca1_high,
+    #     data_folder,
+    #     sampling_rate_lfp,
+    #     lfp,
+    #     session_type=session_type,
+    # )
 
     lfp_spindle, max_power_channel = detect_spindles(
         mouse, imec, rsc_low, rsc_high, data_folder, sampling_rate_lfp, lfp
@@ -170,7 +171,7 @@ def get_sync(lfp_path: Path, mouse: str, imec: str) -> np.ndarray:
         raw_sync = np.load(raw_sync_path)
     else:
         print("Existing not found, loading raw sync from npyx")
-        raw_sync = load_sync_npyx(lfp_path, "lowpass")
+        raw_sync = load_sync_npyx(lfp_path)
 
     npx_sync_times = threshold_detect(raw_sync, 0.5)
     # There are a few random sync pulses at the start from failed pycontrol sessions

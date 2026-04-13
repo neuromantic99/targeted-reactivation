@@ -92,7 +92,7 @@ def detect_slow_oscillations(
     )
 
     with open(
-        HERE / "results" / "slow_oscillations" / f"{mouse}_{imec}.json",
+        Path("/mnt/MarcBusche/James/Alex/lfp_signatures/slow_oscillations") / f"{mouse}_{imec}.json",
         "w",
     ) as f:
         json.dump(cache_result.model_dump(), f)
