@@ -49,9 +49,9 @@ def get_lfp_signatures(
     mouse = lfp_path.parent.parent.name
     imec = f"imec_{str(lfp_path).split('imec')[1]}"
 
-    if (RIPPLE_PATH / f"{mouse}_{imec}_{session_type}.json").exists():
-        print(f"Ripple results for {mouse}_{imec} already exist, skipping.")
-        return
+    # if (RIPPLE_PATH / f"{mouse}_{imec}_{session_type}.json").exists():
+    #     print(f"Ripple results for {mouse}_{imec} already exist, skipping.")
+    #     return
 
     ca1_low, ca1_high, rsc_low, rsc_high = region_channels
     data_folder = lfp_path.parent.parent
@@ -152,12 +152,12 @@ def get_lfp_signatures(
         session_type=session_type,
     )
 
-    # lfp_spindle, max_power_channel = detect_spindles(
-    #     mouse, imec, rsc_low, rsc_high, data_folder, sampling_rate_lfp, lfp
-    # )
-    # detect_slow_oscillations(
-    #     lfp_spindle, max_power_channel, sampling_rate_lfp, mouse, imec, data_folder
-    # )
+    lfp_spindle, max_power_channel = detect_spindles(
+        mouse, imec, rsc_low, rsc_high, data_folder, sampling_rate_lfp, lfp
+    )
+    detect_slow_oscillations(
+        lfp_spindle, max_power_channel, sampling_rate_lfp, mouse, imec, data_folder
+    )
 
 
 def get_sync(lfp_path: Path, mouse: str, imec: str) -> np.ndarray:
@@ -344,7 +344,9 @@ def plot_ripple_results():
 
 
 def plot_spindle_results():
-    results_files = list((HERE / "results" / "spindles").glob("*.json"))
+    results_files = list(
+        Path("/Volumes/MarcBusche/James/Alex/lfp_signatures/spindles").glob("*.json")
+    )
     data = {
         "Genotype": [],
         "mouse_id": [],
@@ -446,8 +448,8 @@ def plot_spindle_results():
         )
         if key == "Spindle duration (ms)":
             plt.ylim(400, 1000)
-        if key == "Spindle amplitude (µV)":
-            plt.ylim(0, 20)
+        # if key == "Spindle amplitude (µV)":
+        #     plt.ylim(0, 20)
         save_figure(key, FIGURE_PATH)
 
     # Create p-values dataframe
@@ -471,7 +473,11 @@ def plot_spindle_results():
 
 
 def plot_slow_oscillation_results():
-    results_files = list((HERE / "results" / "slow_oscillations").glob("*.json"))
+    results_files = list(
+        Path("/Volumes/MarcBusche/James/Alex/lfp_signatures/slow_oscillations").glob(
+            "*.json"
+        )
+    )
     data = {
         "Genotype": [],
         "mouse_id": [],
@@ -766,6 +772,185 @@ def get_coupling_matrix(
     return coupling_matrix
 
 
+def get_proportion_spindles_in_slow_oscillation(
+    spindle_file: Path, slow_oscillation_file: Path, mouse: str
+):
+
+    spindle_cache = SpindleCache.model_validate_json(spindle_file.read_text())
+    total_length_samples = spindle_cache.length_recording * 2500
+    slow_oscillation_cache = SlowOscillationCache.model_validate_json(
+        slow_oscillation_file.read_text()
+    )
+
+    spindle_times = np.array([spindle.peak_idx for spindle in spindle_cache.spindles])
+    spindle_times = spindle_times[np.array(spindle_cache.state) == "nrem"]
+    if len(spindle_times) == 0:
+        return None
+
+    slows = np.array(
+        [
+            (start, end)
+            for start, end in zip(
+                slow_oscillation_cache.starts, slow_oscillation_cache.ends
+            )
+        ]
+    )
+    slows = slows[np.array(slow_oscillation_cache.state) == "nrem"]
+    if len(slows) == 0:
+        return None
+
+    n_spindles_in_slows = 0
+    for spindle_time in spindle_times:
+        for slow_time in slows:
+            if slow_time[0] <= spindle_time <= slow_time[1]:
+                n_spindles_in_slows += 1
+                break
+
+    total_slow_time = np.sum(slows[:, 1] - slows[:, 0])
+    time_outside_slows = total_length_samples - total_slow_time
+    spindle_rate_in_slows = n_spindles_in_slows / (total_slow_time / 2500)
+    spindle_rate_outside_slows = (len(spindle_times) - n_spindles_in_slows) / (
+        time_outside_slows / 2500
+    )
+    return spindle_rate_in_slows, spindle_rate_outside_slows
+
+    # JUST COUNT
+    # count = 0
+    # for slow_time in slows:
+    #     for spindle_time in spindle_times:
+    #         if slow_time[0] <= spindle_time <= slow_time[1]:
+    #             count += 1
+    #             break
+
+    # return count / len(slows)
+
+
+def get_proportion_ripples_in_spindles(
+    ripple_file: Path, spindle_file: Path, mouse: str
+):
+    spindle_cache = SpindleCache.model_validate_json(spindle_file.read_text())
+    ripple_cache = RipplesCache.model_validate_json(ripple_file.read_text())
+    ripple_times = np.array(
+        [ripple.peak_idx for ripple in ripple_cache.candidate_events]
+    )
+
+    passing_checks = (
+        np.array(ripple_cache.common_average_reference_check)
+        & np.array(ripple_cache.frequency_check)
+        & np.array(ripple_cache.super_ripple_check)
+    )
+    if mouse == "00053":
+        passing_checks = passing_checks[: len(ripple_cache.candidate_events)]
+
+    ripple_times = ripple_times[passing_checks]
+    state = np.array(ripple_cache.state)[passing_checks]
+    ripple_times = ripple_times[state == "nrem"]
+
+    spindle_times = np.array(
+        [(spindle.onset, spindle.offset) for spindle in spindle_cache.spindles]
+    )
+    print(f"Total spindles: {len(spindle_times)}")
+    spindle_times = spindle_times[np.array(spindle_cache.state) == "nrem"]
+
+    n_ripples_in_spindles = 0
+    for ripple_time in ripple_times:
+        for spindle_time in spindle_times:
+            if spindle_time[0] <= ripple_time <= spindle_time[1]:
+                n_ripples_in_spindles += 1
+                break
+
+    total_length_samples = spindle_cache.length_recording * 2500
+    total_spindle_time = np.sum(spindle_times[:, 1] - spindle_times[:, 0])
+    time_outside_spindles = total_length_samples - total_spindle_time
+
+    ripple_rate_in_spindles = n_ripples_in_spindles / (total_spindle_time / 2500)
+    ripple_rate_outside_spindles = (len(ripple_times) - n_ripples_in_spindles) / (
+        time_outside_spindles / 2500
+    )
+
+    # count = 0
+    # for spindle_start, spindle_end in spindle_times:
+    #     count_ripples = np.sum(
+    #         (ripple_times >= spindle_start) & (ripple_times <= spindle_end)
+    #     )
+    #     if count_ripples > 0:
+    #         count += 1
+
+    print(f"Number of nrem spindles: {len(spindle_times)}")
+    print(f"Total nrem ripples: {len(ripple_times)}")
+    # print(f"Ripples within spindles: {count}")
+    print("\n")
+
+    if len(spindle_times) == 0 or len(ripple_times) == 0:
+        return None
+
+    return ripple_rate_in_spindles, ripple_rate_outside_spindles
+
+
+def get_coupling_results_proportion():
+    ripple_files = list((HERE / "results" / "ripples").glob("*.json"))
+    server_cache_path = Path("/Volumes/MarcBusche/James/Alex/lfp_signatures")
+
+    wt_result = []
+    nlgf_result = []
+
+    for ripple_file in ripple_files:
+        if "conditioning" in str(ripple_file):
+            continue
+        mouse = ripple_file.name.split("_")[0]
+        imec = ripple_file.stem[-1]
+        # spindle_file = server_cache_path / "spindles" / f"{mouse}_imec_{imec}.json"
+        spindle_file = (
+            Path("/Users/jamesrowland/Code/targeted-reactivation/results/spindles")
+            / f"{mouse}_imec_{imec}_medianRef.json"
+        )
+        slow_oscillation_file = (
+            server_cache_path / "slow_oscillations" / f"{mouse}_imec_{imec}.json"
+        )
+        assert spindle_file.exists(), f"Spindle file {spindle_file} does not exist"
+        # assert spindle_file.stem == ripple_file.stem
+
+        inside_outside = get_proportion_ripples_in_spindles(
+            ripple_file, spindle_file, mouse
+        )
+        # inside_outside = get_proportion_spindles_in_slow_oscillation(
+        #     spindle_file=spindle_file,
+        #     slow_oscillation_file=slow_oscillation_file,
+        #     mouse=mouse,
+        # )
+
+        if inside_outside is None:
+            continue
+
+        if mouse[:3] == "000":
+            print(f"Mouse  {mouse} is WT")
+            wt_result.append(inside_outside)
+            # wt_n_spindles += n_baseline_spindles
+            # wt_length_nrem += length_nrem
+        else:
+            print(f"Mouse  {mouse} is NLGF")
+            nlgf_result.append(inside_outside)
+            # nlgf_n_spindles += n_baseline_spindles
+            # nlgf_length_nrem += length_nrem
+
+    # sns.boxplot(
+    #     data={"WT": wt_result, "NLGFxS305N": nlgf_result},
+    #     palette={"WT": WT_COLOR, "NLGFxS305N": NLGF_COLOR},
+    # )
+
+    plt.figure()
+    plt.title("WT")
+    for wt in wt_result:
+        plt.plot([0, 1], [wt[0] * 60, wt[1] * 60], color=WT_COLOR, alpha=1)
+
+    plt.figure()
+    plt.title("NLGFxS305N")
+    for nlgf in nlgf_result:
+        plt.plot([0, 1], [nlgf[0] * 60, nlgf[1] * 60], color=NLGF_COLOR, alpha=1)
+
+    plt.show()
+
+
 def get_coupling_results():
     ripple_files = list((HERE / "results" / "ripples").glob("*.json"))
 
@@ -845,9 +1030,11 @@ def get_coupling_results():
 
 
 if __name__ == "__main__":
-    # main()
-    get_coupling_results()
+    main()
+    # get_coupling_results()
     # plot_spindle_results()
+    # plot_slow_oscillation_results()
+    get_coupling_results_proportion()
 
     """
     go through every ripple
