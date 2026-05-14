@@ -418,8 +418,6 @@ def process_probe(
         (closest_channel >= rsc_low) & (closest_channel <= rsc_high)
     )
 
-    idx_keep = (closest_channel >= ca1_low) & (closest_channel <= ca1_high)
-
     spike_times = spike_times[idx_keep]
     spike_clusters = spike_clusters[idx_keep]
 
@@ -1219,7 +1217,7 @@ def get_sleep_state(data_path: Path) -> np.ndarray:
 
 
 if __name__ == "__main__":
-    # main()
+    main()
     sleep_scores = np.load(
         HERE / "results" / f"mouse_sleep_scores.npy", allow_pickle=True
     ).item()
