@@ -1,10 +1,9 @@
 from pathlib import Path
 
 
-SERVER_PATH = Path("/mnt/MarcBusche")
-LOCAL_SSD = Path("/mnt/local-ssd/james/targeted-reactivation")
+SERVER_PATH = Path("/Volumes/MarcBusche")
+LOCAL_SSD = Path("/Volumes/hard_drive/targeted_reactivation")
 LFP_SYNC_FOLDER = LOCAL_SSD / "lfp_syncs"
-
 
 KILOSORT_UMBRELLA = SERVER_PATH / "Alex" / "Reactivations"
 SERVER_CACHE_PATH = Path(
